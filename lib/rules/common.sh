@@ -191,3 +191,22 @@ log_event() {
   cat "$entry_tmp" >> "$RULE_LOG" || return 74
   rm -f "$entry_tmp"
 }
+
+# 日志档位：off / blocked_error / all。只有选“全部模块事件”时才写明细事件
+# （放行计数、命中来源等），其余档位保持安静，避免默认档位写出大量日志。
+log_mode_is_all() {
+  [ -n "${CONFIG_DIR-}" ] || return 1
+  [ -f "$CONFIG_DIR/log-mode.prop" ] || return 1
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    [ "$key" = mode ] || continue
+    [ "$value" = all ] && return 0
+    return 1
+  done < "$CONFIG_DIR/log-mode.prop"
+  return 1
+}
+
+# 只在“全部模块事件”档位落盘的明细日志；其他档位直接成功返回，不影响调用方。
+log_verbose_event() {
+  log_mode_is_all || return 0
+  log_event "$@"
+}

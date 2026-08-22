@@ -16,7 +16,7 @@ status_serialize_projection() {
   status_phase_valid "$phase" || return 65
   status_result_valid "$result" || return 65
   [ "$busy" = true ] || [ "$busy" = false ] || return 65
-  printf '%s\n' "{\"schemaVersion\":1,\"phase\":\"$phase\",\"result\":\"$result\",\"busy\":$busy,\"operationId\":null,\"operationVerb\":null,\"operationStartedAt\":null,\"initialRefreshPending\":false,\"autoRefresh\":{\"enabled\":false,\"intervalHours\":24},\"desiredSourcesRevision\":null,\"appliedSourcesRevision\":null,\"sourcesOutOfSync\":false,\"manualBlockCount\":0,\"manualAllowCount\":0,\"enhancedWhitelist\":{\"enabled\":false,\"url\":null,\"state\":\"disabled\",\"ruleCount\":0,\"skippedCount\":0,\"updatedAt\":null,\"error\":null},\"desiredMode\":null,\"activeMode\":null,\"activeGeneration\":null,\"alternateGeneration\":null,\"alternateAction\":\"none\",\"ruleCount\":0,\"lastSuccessAt\":null,\"lastFailureAt\":null,\"lastError\":null,\"mountTarget\":null,\"mountedSha256\":null,\"sources\":[]}"
+  printf '%s\n' "{\"schemaVersion\":1,\"phase\":\"$phase\",\"result\":\"$result\",\"busy\":$busy,\"operationId\":null,\"operationVerb\":null,\"operationStartedAt\":null,\"initialRefreshPending\":false,\"autoRefresh\":{\"enabled\":false,\"intervalHours\":24},\"desiredSourcesRevision\":null,\"appliedSourcesRevision\":null,\"sourcesOutOfSync\":false,\"manualBlockCount\":0,\"manualAllowCount\":0,\"desiredMode\":null,\"activeMode\":null,\"activeGeneration\":null,\"alternateGeneration\":null,\"alternateAction\":\"none\",\"ruleCount\":0,\"lastSuccessAt\":null,\"lastFailureAt\":null,\"lastError\":null,\"mountTarget\":null,\"mountedSha256\":null,\"sources\":[]}"
 }
 
 status_nullable_string() {
@@ -37,7 +37,7 @@ status_manifest_validate() {
     {
       if(NF!=2)bad()
       k=$1; v=$2
-       if(k !~ /^(schema_version|generation_id|sources_revision|config_snapshot_sha256|base_sha256|recovery_sha256|all_sha256|reward_sha256|all_rule_count|reward_rule_count|source_count|enhanced_whitelist_(enabled|url_sha256|state|rule_count|skipped_count|updated_at|error))$/ && k !~ /^source_[0-9]+_(id|kind|state|updated_at|url_sha256|content_sha256|rule_count|allow_count|skipped_count|error)$/)bad()
+       if(k !~ /^(schema_version|generation_id|sources_revision|config_snapshot_sha256|base_sha256|recovery_sha256|all_sha256|reward_sha256|all_rule_count|reward_rule_count|source_count)$/ && k !~ /^source_[0-9]+_(id|kind|state|updated_at|url_sha256|content_sha256|rule_count|allow_count|skipped_count|error)$/)bad()
       if(seen[k]++)bad()
       value[k]=v; keys++
     }
@@ -49,13 +49,7 @@ status_manifest_validate() {
       for(k in value){if(k ~ /^(all|reward)_rule_count$/ && value[k]!~/^[0-9]+$/)bad()}
       if(value["source_count"] !~ /^[0-9]+$/ || value["source_count"]>19)bad()
        expected=11+value["source_count"]*10
-       enhanced=0
-       if("enhanced_whitelist_enabled" in value){
-         enhanced=1
-         for(k in value) if(k ~ /^enhanced_whitelist_/) enhanced_keys++
-         if(enhanced_keys!=7 || value["enhanced_whitelist_enabled"] !~ /^[01]$/ || value["enhanced_whitelist_state"] !~ /^(fresh|stale|error|disabled)$/ || value["enhanced_whitelist_rule_count"] !~ /^[0-9]+$/ || value["enhanced_whitelist_skipped_count"] !~ /^[0-9]+$/ || value["enhanced_whitelist_updated_at"] !~ /^[0-9]+$/ || value["enhanced_whitelist_error"] !~ /^(null|unsupported_format|source_unavailable|download_failed_using_cache)$/)bad()
-       }
-       if(keys!=expected+enhanced*7)bad()
+       if(keys!=expected)bad()
       for(i=1;i<=value["source_count"];i++){
         p="source_" i "_"
          if(!(p "id" in value) || !(p "kind" in value) || !(p "state" in value) || !(p "updated_at" in value) || !(p "url_sha256" in value) || !(p "content_sha256" in value) || !(p "rule_count" in value) || !(p "allow_count" in value) || !(p "skipped_count" in value) || !(p "error" in value))bad()
@@ -104,7 +98,7 @@ status_diagnostic_meta() {
         if ($5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/) next
         count=$5; skipped=$6; updated=$7
       } else {
-        if (wanted=="enhanced_whitelist" || NF!=6 || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/) next
+        if (NF!=6 || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/) next
         count=0; skipped=$5; updated=$6
       }
       if (found++) next
@@ -139,26 +133,6 @@ status_source_name_url_valid() {
   else
     config_decode_source_fields "$name_b64" "$url_b64"
   fi
-}
-
-status_enhanced_whitelist_projection() {
-  local revision=$1 enabled url url_sha diag state=error count=0 skipped=0 error=source_unavailable updated=
-  enabled=$(config_enhanced_whitelist_value "$revision" enabled) || return
-  url=$(config_enhanced_whitelist_url "$revision") || return
-  if [ "$enabled" = 0 ]; then
-    printf '{"enabled":false,"url":%s,"state":"disabled","ruleCount":0,"skippedCount":0,"updatedAt":null,"error":null}' "$(status_nullable_string "$url")"
-    return
-  fi
-  url_sha=$(printf '%s' "$url" | sha256_file_stdin) || return
-  if diag=$(status_diagnostic_meta "$RULE_RUNTIME/source-diagnostics.tsv" enhanced_whitelist "$url_sha" 2>/dev/null); then
-    IFS="$(printf '\t')" read -r state count skipped error updated <<EOF
-$diag
-EOF
-    status_health_normalize "$state" "$count" "$skipped" "$error" "$updated"
-    state=$STATUS_HEALTH_STATE; count=$STATUS_HEALTH_COUNT; skipped=$STATUS_HEALTH_SKIPPED; error=$STATUS_HEALTH_ERROR; updated=$STATUS_HEALTH_UPDATED
-  fi
-  printf '{"enabled":true,"url":%s,"state":"%s","ruleCount":%s,"skippedCount":%s,"updatedAt":%s,"error":%s}' \
-    "$(status_nullable_string "$url")" "$state" "$count" "$skipped" "${updated:-null}" "$(status_nullable_string "$error")"
 }
 
 status_sources_projection() {
@@ -263,7 +237,7 @@ status_json() {
   local phase=idle result=ok busy=false operation_id= operation_verb= operation_started=
   local desired_revision= applied_revision= desired_mode= active_mode= active_generation=
   local alternate_generation= alternate_action=none rule_count=0 mounted_sha= sources_out=false
-  local sources_json='[]' enhanced_json='{"enabled":false,"url":null,"state":"disabled","ruleCount":0,"skippedCount":0,"updatedAt":null,"error":null}' manifest_path manual_block_count=0 manual_allow_count=0
+  local sources_json='[]' manifest_path manual_block_count=0 manual_allow_count=0
   local last_success= last_failure= last_error=null result_file finished initial_refresh_pending=false auto_refresh_json
 
   [ -f "$RULE_RUNTIME/initial-refresh.pending" ] && initial_refresh_pending=true
@@ -311,7 +285,6 @@ status_json() {
       manifest_path="$RULE_GENERATIONS/$active_generation/manifest.prop"
     fi
     sources_json=$(status_sources_projection "$desired_revision" "$manifest_path" "$active_generation" 2>/dev/null) || return 70
-    enhanced_json=$(status_enhanced_whitelist_projection "$desired_revision" 2>/dev/null) || return 70
   fi
 
   if [ -f "$RULE_RUNTIME/current-operation.prop" ]; then
@@ -343,7 +316,7 @@ status_json() {
     "$(status_nullable_string "$operation_id")" "$(status_nullable_string "$operation_verb")" "${operation_started:-null}" "$initial_refresh_pending" "$auto_refresh_json"
   printf '"desiredSourcesRevision":%s,"appliedSourcesRevision":%s,"sourcesOutOfSync":%s,' \
     "${desired_revision:-null}" "${applied_revision:-null}" "$sources_out"
-  printf '"manualBlockCount":%s,"manualAllowCount":%s,"enhancedWhitelist":%s,' "$manual_block_count" "$manual_allow_count" "$enhanced_json"
+  printf '"manualBlockCount":%s,"manualAllowCount":%s,' "$manual_block_count" "$manual_allow_count"
   printf '"desiredMode":%s,"activeMode":%s,"activeGeneration":%s,"alternateGeneration":%s,' \
     "$(status_nullable_string "$desired_mode")" "$(status_nullable_string "$active_mode")" \
     "$(status_nullable_string "$active_generation")" "$(status_nullable_string "$alternate_generation")"

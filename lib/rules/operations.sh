@@ -30,14 +30,14 @@ operation_token_valid() {
 
 operation_verb_valid() {
   case "$1" in
-    refresh|refresh-source|set-auto-refresh|set-builtin|add-source|update-source|set-source|move-source|remove-source|select-mode|pause|resume|set-lists|set-enhanced-whitelist|set-domain-decision|set-overrides|reset-rules|set-notice|set-log-mode|set-app-policy|rollback|set-history|clear-history|clear-cache|test-doh|set-doh|disable-doh) return 0 ;;
+    refresh|refresh-source|set-auto-refresh|set-builtin|add-source|update-source|set-source|move-source|remove-source|select-mode|pause|resume|set-lists|set-domain-decision|set-overrides|reset-rules|set-notice|set-log-mode|set-app-policy|rollback|set-history|clear-history|clear-cache|test-doh|set-doh|disable-doh) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 operation_verb_requires_mount_repair() {
   case "$1" in
-    refresh|refresh-source|set-builtin|add-source|update-source|set-source|move-source|remove-source|select-mode|pause|resume|set-lists|set-enhanced-whitelist|set-domain-decision|set-overrides|reset-rules|rollback) return 0 ;;
+    refresh|refresh-source|set-builtin|add-source|update-source|set-source|move-source|remove-source|select-mode|pause|resume|set-lists|set-domain-decision|set-overrides|reset-rules|rollback) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -53,7 +53,7 @@ operation_expected_argc() {
     refresh|pause|resume|rollback|reset-rules) printf '0\n' ;;
     refresh-source|remove-source|select-mode|set-overrides|set-notice|set-log-mode) printf '1\n' ;;
     set-auto-refresh|set-builtin|add-source|set-source|move-source|set-lists) printf '2\n' ;;
-    update-source|set-enhanced-whitelist) printf '3\n' ;;
+    update-source) printf '3\n' ;;
     set-app-policy) printf '3\n' ;;
     set-domain-decision) printf '2\n' ;;
     set-history) printf '1\n' ;;
@@ -148,9 +148,6 @@ operation_arguments_valid() {
     set-lists)
       operation_list_b64_valid "$1" && operation_list_b64_valid "$2"
       ;;
-    set-enhanced-whitelist)
-      operation_enhanced_whitelist_fields_valid "$1" "$2" "$3"
-      ;;
     set-domain-decision)
       operation_domain_decision_fields_valid "$1" "$2"
       ;;
@@ -240,28 +237,6 @@ operation_list_b64_valid() {
   operation_b64_valid "$value" || return 1
   bytes=$(printf '%s' "$value" | "$BB" base64 -d 2>/dev/null | "$BB" wc -c | "$BB" tr -d ' ') || return 1
   [ "$bytes" -le 65536 ]
-}
-
-operation_enhanced_whitelist_fields_valid() {
-  local enabled=$1 url_b64=$2 manual_b64=$3 config_file="$RULE_TMP/enhanced-whitelist.$$.conf" manual_file="$RULE_TMP/enhanced-whitelist-manual.$$" validation_result result=0
-  [ "$enabled" = 0 ] || [ "$enabled" = 1 ] || return 65
-  if [ -n "$url_b64" ]; then
-    config_b64_valid "$url_b64" || return 65
-  fi
-  printf 'enabled=%s\nurl_b64=%s\n' "$enabled" "$url_b64" > "$config_file" || result=74
-  if [ "$result" -eq 0 ]; then
-    if config_validate_enhanced_whitelist_file "$config_file"; then
-      :
-    else
-      validation_result=$?
-      [ "$validation_result" -eq 74 ] && result=74 || result=65
-    fi
-  fi
-  if [ "$result" -eq 0 ]; then
-    config_decode_domain_list "$manual_b64" "$manual_file" || result=65
-  fi
-  rm -f "$config_file" "$manual_file"
-  return "$result"
 }
 
 operation_domain_decision_fields_valid() {

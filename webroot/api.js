@@ -244,12 +244,6 @@ function validateArgs(verb, args) {
       listEncoded(args[0]);
       listEncoded(args[1]);
       break;
-    case 'set-enhanced-whitelist':
-      count(3);
-      boolean(args[0]);
-      if (args[0] === '1' || args[1] !== '') encoded(args[1]);
-      listEncoded(args[2]);
-      break;
     case 'set-domain-decision':
       count(2);
       if (args[0] !== 'allow' && args[0] !== 'block') invalid('invalid domain decision');

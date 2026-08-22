@@ -256,42 +256,6 @@
               </div>
             </div>
           </section>
-          <section class="enhanced-whitelist-editor" aria-labelledby="enhanced-whitelist-heading" data-liquid-surface>
-            <div class="enhanced-whitelist-heading">
-              <div>
-                <h3 id="enhanced-whitelist-heading">白名单订阅</h3>
-                <p class="muted">开启后自动跟随链接更新，匹配域名将从最终拦截规则中放行。</p>
-              </div>
-              <button class="button button-secondary write-action enhanced-whitelist-toggle" id="enhanced-whitelist-enabled" type="button" aria-pressed="false" aria-controls="enhanced-whitelist-fields" aria-expanded="false" aria-label="启用白名单订阅" disabled>
-                <i data-lucide="shield-plus" aria-hidden="true"></i>
-                <span>启用白名单订阅</span>
-              </button>
-              <button class="icon-button section-toggle" type="button" aria-controls="enhanced-whitelist-body" data-collapse-label="白名单订阅" aria-expanded="true" aria-label="收起白名单订阅" title="收起白名单订阅">
-                <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
-              </button>
-            </div>
-            <div class="collapsible-body" id="enhanced-whitelist-body">
-              <div class="enhanced-whitelist-health" id="enhanced-whitelist-health" aria-live="polite">
-                <span id="enhanced-whitelist-health-state"><span class="state-chip state-chip-neutral"><i data-lucide="circle-pause" aria-hidden="true"></i><span>未启用</span></span></span>
-                <span id="enhanced-whitelist-health-detail">尚无更新记录</span>
-                <span id="enhanced-whitelist-rule-count">0 条</span>
-              </div>
-              <div class="enhanced-whitelist-fields" id="enhanced-whitelist-fields" hidden>
-                <label class="enhanced-whitelist-field" for="enhanced-whitelist-url">
-                  <span class="list-field-heading"><strong>订阅链接</strong><span>仅支持可直接下载的 HTTPS 文本</span></span>
-                  <input id="enhanced-whitelist-url" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="2048" aria-describedby="enhanced-whitelist-url-error" placeholder="https://example.com/allow.txt" disabled>
-                  <span class="field-error" id="enhanced-whitelist-url-error"></span>
-                </label>
-              </div>
-              <div class="enhanced-whitelist-actions">
-                <span class="list-sync" id="enhanced-whitelist-sync-note"></span>
-                <button class="button button-primary write-action" id="save-enhanced-whitelist-button" type="button" disabled>
-                  <i data-lucide="save" aria-hidden="true"></i>
-                  <span>保存订阅</span>
-                </button>
-              </div>
-            </div>
-          </section>
           <section class="list-editor" data-liquid-surface>
             <div class="section-heading">
               <div>
@@ -328,13 +292,7 @@
         </section>
 
         <section class="tab-panel" id="panel-apps" role="tabpanel" aria-labelledby="tab-apps" hidden>
-          <div class="panel-heading">
-            <div>
-              <h2>应用联网策略</h2>
-              <p class="muted">默认关闭；仅在能力检测通过且你主动开启时安装模块专属静态规则。</p>
-            </div>
-          </div>
-          <section class="doh-section" id="doh-section" aria-labelledby="doh-heading">
+          <section class="doh-section" id="doh-section" aria-labelledby="doh-heading" data-liquid-surface>
             <div class="doh-heading">
               <div>
                 <h2 id="doh-heading">加密 DNS</h2>

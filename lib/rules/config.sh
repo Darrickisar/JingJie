@@ -124,73 +124,6 @@ config_validate_custom_file() {
   done < "$file"
 }
 
-config_validate_enhanced_whitelist_file() {
-  local file=$1 enabled url_b64 bytes prefix scan_result result=0
-  local url_file="$RULE_TMP/config-enhanced-whitelist-url.$$"
-  [ -f "$file" ] || return 66
-  "$BB" awk '
-    function bad() { exit 65 }
-    {
-      split_at=index($0,"=")
-      if(split_at<2) bad()
-      key=substr($0,1,split_at-1)
-      value=substr($0,split_at+1)
-    }
-    key !~ /^(enabled|url_b64)$/ { bad() }
-    seen[key]++ { bad() }
-    key == "enabled" && value !~ /^[01]$/ { bad() }
-    END { if (NR != 2 || !seen["enabled"] || !seen["url_b64"]) exit 65 }
-  ' "$file" || return $?
-  enabled=$("$BB" awk -F= '$1=="enabled"{print substr($0,index($0,"=")+1)}' "$file") || return
-  url_b64=$("$BB" awk -F= '$1=="url_b64"{print substr($0,index($0,"=")+1)}' "$file") || return
-  [ -n "$url_b64" ] || [ "$enabled" = 0 ] || return 65
-  [ -z "$url_b64" ] && return 0
-  config_b64_valid "$url_b64" || return 65
-  printf '%s' "$url_b64" | "$BB" base64 -d > "$url_file" 2>/dev/null || result=65
-  if [ "$result" -eq 0 ]; then
-    bytes=$(wc -c < "$url_file" | tr -d ' ') || result=74
-  fi
-  if [ "$result" -eq 0 ]; then
-    [ "$bytes" -ge 9 ] && [ "$bytes" -le 2048 ] || result=65
-  fi
-  if [ "$result" -eq 0 ]; then
-    if config_utf8_valid_file "$url_file"; then
-      :
-    else
-      scan_result=$?
-      [ "$scan_result" -eq 1 ] && result=65 || result=74
-    fi
-  fi
-  if [ "$result" -eq 0 ]; then
-    if config_url_forbidden_bytes "$url_file"; then
-      result=65
-    else
-      scan_result=$?
-      [ "$scan_result" -eq 1 ] || result=74
-    fi
-  fi
-  if [ "$result" -eq 0 ]; then
-    prefix=$("$BB" head -c 8 "$url_file") || result=74
-    [ "$result" -ne 0 ] || [ "$prefix" = 'https://' ] || result=65
-  fi
-  rm -f "$url_file" || [ "$result" -ne 0 ] || result=74
-  return "$result"
-}
-
-config_enhanced_whitelist_value() {
-  local rev=$1 key=$2 file="$CONFIG_DIR/revisions/$1/enhanced-whitelist.conf"
-  config_validate_enhanced_whitelist_file "$file" || return
-  case "$key" in enabled|url_b64) ;; *) return 64 ;; esac
-  "$BB" awk -F= -v wanted="$key" '$1==wanted{print substr($0,index($0,"=")+1)}' "$file"
-}
-
-config_enhanced_whitelist_url() {
-  local rev=$1 encoded
-  encoded=$(config_enhanced_whitelist_value "$rev" url_b64) || return
-  [ -n "$encoded" ] || return 0
-  printf '%s' "$encoded" | "$BB" base64 -d 2>/dev/null
-}
-
 snapshot_sha256() {
   local dir=$1 tmp
   config_validate_rules_file "$dir/rules.conf" || return
@@ -199,9 +132,35 @@ snapshot_sha256() {
   [ -f "$dir/manual-blocklist.txt" ] && [ -f "$dir/manual-allowlist.txt" ] || return 66
   config_validate_domain_list_file "$dir/manual-blocklist.txt" || return
   config_validate_domain_list_file "$dir/manual-allowlist.txt" || return
-  config_validate_enhanced_whitelist_file "$dir/enhanced-whitelist.conf" || return
-  config_validate_domain_list_file "$dir/enhanced-whitelist-manual.txt" || return
   tmp="$RULE_TMP/snapshot.$$"
+  {
+    printf '%s\n' rules.conf
+    cat "$dir/rules.conf"
+    printf '%s\n' sources.tsv
+    cat "$dir/sources.tsv"
+    printf '%s\n' overrides.tsv
+    cat "$dir/overrides.tsv"
+    printf '%s\n' manual-blocklist.txt
+    cat "$dir/manual-blocklist.txt"
+    printf '%s\n' manual-allowlist.txt
+    cat "$dir/manual-allowlist.txt"
+  } > "$tmp" || return 74
+  sha256_file "$tmp"
+  rm -f "$tmp"
+}
+
+# 旧版（schema 2）快照里还带着白名单订阅的两个文件，升级时要按原样重算校验值。
+config_v2_snapshot_sha256() {
+  local dir=$1 tmp
+  config_validate_rules_file "$dir/rules.conf" || return
+  source_registry_validate_file "$dir/sources.tsv" || return
+  overrides_validate_file "$dir/overrides.tsv" || return
+  [ -f "$dir/manual-blocklist.txt" ] && [ -f "$dir/manual-allowlist.txt" ] || return 66
+  [ -f "$dir/enhanced-whitelist.conf" ] || return 66
+  config_validate_domain_list_file "$dir/manual-blocklist.txt" || return
+  config_validate_domain_list_file "$dir/manual-allowlist.txt" || return
+  config_validate_domain_list_file "$dir/enhanced-whitelist-manual.txt" || return
+  tmp="$RULE_TMP/snapshot-v2.$$"
   {
     printf '%s\n' rules.conf
     cat "$dir/rules.conf"
@@ -229,7 +188,7 @@ config_v1_snapshot_sha256() {
   [ -f "$dir/manual-blocklist.txt" ] && [ -f "$dir/manual-allowlist.txt" ] || return 66
   config_validate_domain_list_file "$dir/manual-blocklist.txt" || return
   config_validate_domain_list_file "$dir/manual-allowlist.txt" || return
-  config_validate_enhanced_whitelist_file "$dir/enhanced-whitelist.conf" || return
+  [ -f "$dir/enhanced-whitelist.conf" ] || return 66
   config_validate_domain_list_file "$dir/enhanced-whitelist-manual.txt" || return
   tmp="$RULE_TMP/snapshot-v1.$$"
   {
@@ -347,14 +306,12 @@ config_decode_domain_list() {
 }
 
 config_lists_json() {
-  local revision=$1 block allow first=true line block_count allow_count enhanced_enabled enhanced_url
+  local revision=$1 block allow first=true line block_count allow_count
   case "$revision" in ''|*[!0-9]*) return 65 ;; esac
   block="$CONFIG_DIR/revisions/$revision/manual-blocklist.txt"
   allow="$CONFIG_DIR/revisions/$revision/manual-allowlist.txt"
   config_validate_domain_list_file "$block" || return
   config_validate_domain_list_file "$allow" || return
-  enhanced_enabled=$(config_enhanced_whitelist_value "$revision" enabled) || return
-  enhanced_url=$(config_enhanced_whitelist_url "$revision") || return
   block_count=$(wc -l < "$block" | tr -d ' ')
   allow_count=$(wc -l < "$allow" | tr -d ' ')
   printf '{"revision":%s,"blockCount":%s,"allowCount":%s,"block":[' "$revision" "$block_count" "$allow_count"
@@ -372,13 +329,7 @@ config_lists_json() {
     first=false
     printf '"%s"' "$(printf '%s' "$line" | json_escape)"
   done < "$allow"
-  printf '],"enhancedWhitelist":{"enabled":%s,"url":' "$([ "$enhanced_enabled" = 1 ] && printf true || printf false)"
-  if [ -n "$enhanced_url" ]; then
-    printf '"%s"' "$(printf '%s' "$enhanced_url" | json_escape)"
-  else
-    printf 'null'
-  fi
-  printf '}}\n'
+  printf ']}\n'
 }
 
 config_fold_legacy_enhanced_manual() {
@@ -506,8 +457,61 @@ config_migrate_current_registry() {
   source_registry_validate_file "$tmp/sources.tsv" || { rm -rf "$tmp"; return 65; }
   cp "$old_dir/manual-blocklist.txt" "$tmp/manual-blocklist.txt" || { rm -rf "$tmp"; return 74; }
   cp "$old_dir/manual-allowlist.txt" "$tmp/manual-allowlist.txt" || { rm -rf "$tmp"; return 74; }
-  cp "$old_dir/enhanced-whitelist.conf" "$tmp/enhanced-whitelist.conf" || { rm -rf "$tmp"; return 74; }
-  cp "$old_dir/enhanced-whitelist-manual.txt" "$tmp/enhanced-whitelist-manual.txt" || { rm -rf "$tmp"; return 74; }
+  config_fold_legacy_allowlist "$old_dir" "$tmp/manual-allowlist.txt" || {
+    result=$?
+    rm -rf "$tmp"
+    return "$result"
+  }
+  config_commit_dir "$new_rev" || {
+    result=$?
+    rm -rf "$tmp"
+    return "$result"
+  }
+}
+
+# 老快照里的“白名单订阅”手动条目要合并进普通白名单，功能下线后一条都不能丢。
+config_fold_legacy_allowlist() {
+  local old_dir=$1 allowlist=$2 legacy="$1/enhanced-whitelist-manual.txt" staged result
+  [ -f "$legacy" ] || return 0
+  staged="$RULE_TMP/legacy-allow.$$"
+  cp "$legacy" "$staged" || return 74
+  config_fold_legacy_enhanced_manual "$allowlist" "$staged" || {
+    result=$?
+    rm -f "$staged"
+    return "$result"
+  }
+  rm -f "$staged"
+}
+
+# schema 2 的快照带着白名单订阅文件，这里原地升级成不含订阅的新版快照。
+config_migrate_v2_registry() {
+  config_validate_pointer || return
+  local old_rev expected actual new_rev tmp old_dir result file
+  old_rev=$(pointer_value sources_revision) || return
+  expected=$(pointer_value snapshot_sha256) || return
+  old_dir="$CONFIG_DIR/revisions/$old_rev"
+  actual=$(config_v2_snapshot_sha256 "$old_dir") || return
+  [ "$expected" = "$actual" ] || return 70
+  new_rev=$((old_rev + 1))
+  while [ -e "$CONFIG_DIR/revisions/$new_rev" ] || [ -e "$CONFIG_DIR/revisions/$new_rev.tmp" ]; do
+    new_rev=$((new_rev + 1))
+  done
+  tmp="$CONFIG_DIR/revisions/$new_rev.tmp"
+  rm -rf "$tmp"
+  mkdir -p "$tmp" || return 73
+  for file in rules.conf sources.tsv overrides.tsv manual-blocklist.txt manual-allowlist.txt; do
+    cp "$old_dir/$file" "$tmp/$file" || { rm -rf "$tmp"; return 74; }
+  done
+  config_fold_legacy_allowlist "$old_dir" "$tmp/manual-allowlist.txt" || {
+    result=$?
+    rm -rf "$tmp"
+    return "$result"
+  }
+  config_replace_rule_value "$tmp/rules.conf" sources_revision "$new_rev" || {
+    result=$?
+    rm -rf "$tmp"
+    return "$result"
+  }
   config_commit_dir "$new_rev" || {
     result=$?
     rm -rf "$tmp"
@@ -525,7 +529,7 @@ config_bootstrap() {
       config_prune_custom_cache "$revision" || return
       return 0
     fi
-    config_migrate_current_registry || return
+    config_migrate_current_registry 2>/dev/null || config_migrate_v2_registry || return
     revision=$(config_current_revision) || return
     config_prune_custom_cache "$revision" || return
     return
@@ -541,8 +545,6 @@ config_bootstrap() {
   : > "$tmp/overrides.tsv" || return 74
   : > "$tmp/manual-blocklist.txt"
   : > "$tmp/manual-allowlist.txt"
-  printf 'enabled=0\nurl_b64=\n' > "$tmp/enhanced-whitelist.conf"
-  : > "$tmp/enhanced-whitelist-manual.txt"
   config_commit_dir 0 || return
   [ -f "$CONFIG_DIR/mode.prop" ] || config_write_default_mode
   config_prune_custom_cache 0 || return
@@ -611,16 +613,6 @@ config_clone_next() {
   else
     : > "$tmp/manual-allowlist.txt"
   fi
-  if [ -f "$CONFIG_DIR/revisions/$old_rev/enhanced-whitelist.conf" ]; then
-    cp "$CONFIG_DIR/revisions/$old_rev/enhanced-whitelist.conf" "$tmp/enhanced-whitelist.conf" || return 74
-  else
-    printf 'enabled=0\nurl_b64=\n' > "$tmp/enhanced-whitelist.conf" || return 74
-  fi
-  if [ -f "$CONFIG_DIR/revisions/$old_rev/enhanced-whitelist-manual.txt" ]; then
-    cp "$CONFIG_DIR/revisions/$old_rev/enhanced-whitelist-manual.txt" "$tmp/enhanced-whitelist-manual.txt" || return 74
-  else
-    : > "$tmp/enhanced-whitelist-manual.txt"
-  fi
   "$BB" awk -F= -v rev="$new_rev" 'BEGIN{OFS="="} $1=="sources_revision"{$2=rev} {print}' \
     "$tmp/rules.conf" > "$tmp/rules.new" || return 74
   mv "$tmp/rules.new" "$tmp/rules.conf" || return 74
@@ -644,7 +636,7 @@ config_prune_custom_cache() {
     revision=$(config_current_revision) || return
   fi
   case "$revision" in ''|*[!0-9]*) return 65 ;; esac
-  config_prune_enhanced_whitelist_cache "$revision" || return
+  rm -rf "$CACHE_DIR/enhanced-whitelist" || return 74
   cache_root="$CACHE_DIR/custom"
   [ -d "$cache_root" ] || return 0
   sources="$CONFIG_DIR/revisions/$revision/sources.tsv"
@@ -693,28 +685,6 @@ config_prune_custom_cache() {
   rm -f "$allowed"
 }
 
-config_prune_enhanced_whitelist_cache() {
-  local revision=${1-} cache_root enabled url hash file base
-  [ -n "${CACHE_DIR-}" ] || return 0
-  cache_root="$CACHE_DIR/enhanced-whitelist"
-  [ -d "$cache_root" ] || return 0
-  if [ -z "$revision" ]; then
-    revision=$(config_current_revision) || return
-  fi
-  enabled=$(config_enhanced_whitelist_value "$revision" enabled) || return
-  if [ "$enabled" = 0 ]; then
-    rm -rf "$cache_root"
-    return
-  fi
-  url=$(config_enhanced_whitelist_url "$revision") || return
-  hash=$(config_custom_cache_hash "$url") || return
-  for file in "$cache_root"/*; do
-    [ -e "$file" ] || [ -L "$file" ] || continue
-    base=${file##*/}
-    [ "$base" = "$hash.hosts" ] || rm -rf "$file" || return 74
-  done
-}
-
 # 清理缓存：只删掉已停用来源留下的缓存副本。
 # 启用中的来源必须保留缓存，否则断网时就没有兜底副本可用。
 # 成功时向 stdout 输出被清理的条目数，供调用方写日志。
@@ -740,7 +710,7 @@ config_clear_disabled_cache() {
 
 config_mutate_locked() {
   rules_lock_is_held rules || return 75
-  local verb=${1-} old_rev new_rev tmp rules sources overrides_file blocklist allowlist enhanced_config enhanced_manual result removed_id=
+  local verb=${1-} old_rev new_rev tmp rules sources overrides_file blocklist allowlist result removed_id=
   old_rev=$(config_current_revision) || return
   new_rev=$((old_rev + 1))
   config_clone_next "$old_rev" "$new_rev" || return
@@ -750,16 +720,6 @@ config_mutate_locked() {
   overrides_file="$tmp/overrides.tsv"
   blocklist="$tmp/manual-blocklist.txt"
   allowlist="$tmp/manual-allowlist.txt"
-  enhanced_config="$tmp/enhanced-whitelist.conf"
-  enhanced_manual="$tmp/enhanced-whitelist-manual.txt"
-
-  if [ "$verb" != set-lists ]; then
-    config_fold_legacy_enhanced_manual "$allowlist" "$enhanced_manual" || {
-      result=$?
-      rm -rf "$tmp"
-      return "$result"
-    }
-  fi
 
   case "$verb:$#" in
     reset-rules:1)
@@ -768,8 +728,6 @@ config_mutate_locked() {
       : > "$overrides_file" || { rm -rf "$tmp"; return 74; }
       : > "$blocklist" || { rm -rf "$tmp"; return 74; }
       : > "$allowlist" || { rm -rf "$tmp"; return 74; }
-      printf 'enabled=0\nurl_b64=\n' > "$enhanced_config" || { rm -rf "$tmp"; return 74; }
-      : > "$enhanced_manual" || { rm -rf "$tmp"; return 74; }
       ;;
     set-builtin:3)
       local builtin=$2 enabled=$3
@@ -858,7 +816,6 @@ config_mutate_locked() {
     set-lists:3)
       config_decode_domain_list "$2" "$blocklist" || { rm -rf "$tmp"; return 65; }
       config_decode_domain_list "$3" "$allowlist" || { rm -rf "$tmp"; return 65; }
-      : > "$enhanced_manual" || { rm -rf "$tmp"; return 74; }
       ;;
     set-domain-decision:3)
       local decision=$2 domain_b64=$3 domain_file="$RULE_TMP/domain-decision-config.$$" domain result
@@ -886,21 +843,6 @@ config_mutate_locked() {
       mv "$blocklist.new" "$blocklist" || { rm -rf "$tmp"; return 74; }
       mv "$allowlist.new" "$allowlist" || { rm -rf "$tmp"; return 74; }
       ;;
-    set-enhanced-whitelist:4)
-      local enhanced_enabled=$2 enhanced_url_b64=$3
-      [ "$enhanced_enabled" = 0 ] || [ "$enhanced_enabled" = 1 ] || { rm -rf "$tmp"; return 65; }
-      if [ -n "$enhanced_url_b64" ]; then
-        config_b64_valid "$enhanced_url_b64" || { rm -rf "$tmp"; return 65; }
-      fi
-      printf 'enabled=%s\nurl_b64=%s\n' "$enhanced_enabled" "$enhanced_url_b64" > "$enhanced_config" || { rm -rf "$tmp"; return 74; }
-      config_validate_enhanced_whitelist_file "$enhanced_config" || { rm -rf "$tmp"; return 65; }
-      config_decode_domain_list "$4" "$enhanced_manual" || { rm -rf "$tmp"; return 65; }
-      config_fold_legacy_enhanced_manual "$allowlist" "$enhanced_manual" || {
-        result=$?
-        rm -rf "$tmp"
-        return "$result"
-      }
-      ;;
     *) rm -rf "$tmp"; return 64 ;;
   esac
 
@@ -911,6 +853,8 @@ config_mutate_locked() {
   fi
   [ -z "$removed_id" ] || source_registry_remove_cache "$removed_id" || return
   config_prune_custom_cache "$new_rev" || return
+  # 来源一旦被停用就立刻清掉它的缓存副本，不用再等用户手动点“清理缓存”。
+  config_clear_disabled_cache "$new_rev" >/dev/null || return
 }
 
 config_import_file_size_le() {
@@ -1072,12 +1016,15 @@ config_import_active() {
   old_snapshot="$old_dir/revisions/$rev"
   [ -d "$old_snapshot" ] && [ ! -L "$old_snapshot" ] || return 66
 
-  if actual=$(snapshot_sha256 "$old_snapshot" 2>/dev/null); then
-    format=v2
-  elif actual=$(config_v1_snapshot_sha256 "$old_snapshot" 2>/dev/null); then
+  if [ -f "$old_snapshot/custom-sources.tsv" ]; then
     format=v1
+    actual=$(config_v1_snapshot_sha256 "$old_snapshot" 2>/dev/null) || return 65
+  elif [ -f "$old_snapshot/enhanced-whitelist.conf" ]; then
+    format=v2
+    actual=$(config_v2_snapshot_sha256 "$old_snapshot" 2>/dev/null) || return 65
   else
-    return 65
+    format=v3
+    actual=$(snapshot_sha256 "$old_snapshot" 2>/dev/null) || return 65
   fi
   [ "$expected" = "$actual" ] || return 70
   embedded=$("$BB" awk -F= '$1=="sources_revision"{print $2}' "$old_snapshot/rules.conf") || return 74
@@ -1105,13 +1052,19 @@ config_import_active() {
   config_import_stage_app_policy "$old_dir" "$meta_tmp" || {
     result=$?; rm -rf "$tmp" "$meta_tmp"; return "$result"
   }
-  if [ "$format" = v2 ]; then
-    set -- rules.conf sources.tsv overrides.tsv manual-blocklist.txt manual-allowlist.txt \
-      enhanced-whitelist.conf enhanced-whitelist-manual.txt
-  else
-    set -- rules.conf custom-sources.tsv manual-blocklist.txt manual-allowlist.txt \
-      enhanced-whitelist.conf enhanced-whitelist-manual.txt
-  fi
+  case "$format" in
+    v3)
+      set -- rules.conf sources.tsv overrides.tsv manual-blocklist.txt manual-allowlist.txt
+      ;;
+    v2)
+      set -- rules.conf sources.tsv overrides.tsv manual-blocklist.txt manual-allowlist.txt \
+        enhanced-whitelist.conf enhanced-whitelist-manual.txt
+      ;;
+    *)
+      set -- rules.conf custom-sources.tsv manual-blocklist.txt manual-allowlist.txt \
+        enhanced-whitelist.conf enhanced-whitelist-manual.txt
+      ;;
+  esac
   for source_file do
     [ -f "$old_snapshot/$source_file" ] && [ ! -L "$old_snapshot/$source_file" ] || {
       rm -rf "$tmp" "$meta_tmp"

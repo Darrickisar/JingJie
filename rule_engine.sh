@@ -350,7 +350,6 @@ engine_validate_mutation_argv() {
     set-overrides:2) operation_overrides_b64_valid "$2" ;;
     reset-rules:1) return 0 ;;
     set-lists:3) return 0 ;;
-    set-enhanced-whitelist:4) operation_enhanced_whitelist_fields_valid "$2" "$3" "$4" ;;
     set-domain-decision:3) operation_domain_decision_fields_valid "$2" "$3" ;;
     *) return 64 ;;
   esac
@@ -379,7 +378,7 @@ engine_dispatch() {
     logs) [ "$#" -eq 3 ] || return 64; engine_logs "$2" "$3" ;;
     history-mount-trace) [ "$#" -eq 2 ] || return 64; engine_history_mount_trace "$2" ;;
     history-mount-normal) [ "$#" -eq 1 ] || return 64; engine_history_mount_normal ;;
-    set-builtin|add-source|update-source|toggle-source|move-source|remove-source|set-overrides|reset-rules|set-lists|set-enhanced-whitelist|set-domain-decision)
+    set-builtin|add-source|update-source|toggle-source|move-source|remove-source|set-overrides|reset-rules|set-lists|set-domain-decision)
       engine_validate_mutation_argv "$@" || return 64
       engine_mutate_and_apply "$@"
       ;;

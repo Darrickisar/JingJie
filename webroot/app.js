@@ -61,7 +61,6 @@ const DOH_ERRORS = {
 
 const VERB_LABELS = {
   'set-lists': '保存黑白名单',
-  'set-enhanced-whitelist': '保存白名单订阅',
   'set-domain-decision': '更新域名名单',
   refresh: '刷新规则',
   pause: '暂停保护',
@@ -156,16 +155,6 @@ const elements = {
   allowListError: document.querySelector('#allow-list-error'),
   listSyncNote: document.querySelector('#list-sync-note'),
   saveListsButton: document.querySelector('#save-lists-button'),
-  enhancedWhitelistEnabled: document.querySelector('#enhanced-whitelist-enabled'),
-  enhancedWhitelistFields: document.querySelector('#enhanced-whitelist-fields'),
-  enhancedWhitelistUrl: document.querySelector('#enhanced-whitelist-url'),
-  enhancedWhitelistUrlError: document.querySelector('#enhanced-whitelist-url-error'),
-  enhancedWhitelistRuleCount: document.querySelector('#enhanced-whitelist-rule-count'),
-  enhancedWhitelistHealth: document.querySelector('#enhanced-whitelist-health'),
-  enhancedWhitelistHealthState: document.querySelector('#enhanced-whitelist-health-state'),
-  enhancedWhitelistHealthDetail: document.querySelector('#enhanced-whitelist-health-detail'),
-  enhancedWhitelistSyncNote: document.querySelector('#enhanced-whitelist-sync-note'),
-  saveEnhancedWhitelistButton: document.querySelector('#save-enhanced-whitelist-button'),
   domainOverrides: document.querySelector('#domain-overrides'),
   overrideCount: document.querySelector('#override-count'),
   overrideError: document.querySelector('#override-error'),
@@ -655,31 +644,7 @@ function setWritesDisabled(disabled) {
     elements.diagnosticsButton.disabled = !initialized || Boolean(currentStatus?.busy) || diagnosticsLoading;
   }
   syncDohControls(unavailable);
-  syncEnhancedWhitelistControls(unavailable);
   syncHistoryControls();
-}
-
-function syncEnhancedWhitelistControls(disabled = !initialized || !managementUnlocked || Boolean(currentStatus?.busy)) {
-  const unavailable = disabled || listsLoading;
-  const enabled = elements.enhancedWhitelistEnabled.getAttribute('aria-pressed') === 'true';
-  elements.enhancedWhitelistEnabled.disabled = unavailable;
-  elements.enhancedWhitelistEnabled.setAttribute('aria-pressed', String(enabled));
-  elements.enhancedWhitelistEnabled.setAttribute('aria-expanded', String(enabled));
-  elements.enhancedWhitelistEnabled.setAttribute('aria-label', enabled ? '停用白名单订阅' : '启用白名单订阅');
-  const label = elements.enhancedWhitelistEnabled.querySelector('span');
-  if (label) label.textContent = enabled ? '已启用白名单订阅' : '启用白名单订阅';
-  if (elements.enhancedWhitelistFields) elements.enhancedWhitelistFields.hidden = !enabled;
-  elements.enhancedWhitelistUrl.disabled = unavailable || !enabled;
-  elements.saveEnhancedWhitelistButton.disabled = unavailable;
-}
-
-function enhancedWhitelistIsEnabled() {
-  return elements.enhancedWhitelistEnabled.getAttribute('aria-pressed') === 'true';
-}
-
-function setEnhancedWhitelistEnabled(enabled) {
-  elements.enhancedWhitelistEnabled.setAttribute('aria-pressed', String(Boolean(enabled)));
-  syncEnhancedWhitelistControls();
 }
 
 function sourceState(source) {
@@ -1022,47 +987,6 @@ function renderListErrors(blockError = '', allowError = '') {
   elements.manualAllowlist.toggleAttribute('aria-invalid', Boolean(allowError));
 }
 
-function renderEnhancedWhitelistErrors(urlError = '') {
-  elements.enhancedWhitelistUrlError.textContent = urlError;
-  elements.enhancedWhitelistUrl.toggleAttribute('aria-invalid', Boolean(urlError));
-}
-
-function validateEnhancedWhitelistUrl(value, required) {
-  const url = value.trim();
-  if (!url) return required ? { error: '开启后需要填写 HTTPS 订阅链接' } : { value: '' };
-  if (new TextEncoder().encode(url).length > 2048) return { error: '订阅链接不能超过 2,048 字节' };
-  if (/\s|`/.test(url)) return { error: '订阅链接不能包含空白字符或反引号' };
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' || !parsed.hostname) throw new Error('invalid URL');
-  } catch {
-    return { error: '请填写有效的 HTTPS 订阅链接' };
-  }
-  return { value: url };
-}
-
-function renderEnhancedWhitelistStatus(status = {}) {
-  const source = {
-    state: status.enabled ? status.state : 'disabled',
-    error: status.error,
-    skippedCount: status.skippedCount ?? 0,
-  };
-  const state = sourceState(source);
-  const details = [];
-  if (typeof source.error === 'string') {
-    details.push(SOURCE_ERRORS[source.error] || SOURCE_ERRORS.source_unavailable);
-  }
-  if (source.skippedCount > 0) details.push(`已跳过 ${formatCount(source.skippedCount)} 条`);
-  if (Number.isFinite(status.updatedAt)) details.push(`更新于 ${formatTime(status.updatedAt)}`);
-  elements.enhancedWhitelistRuleCount.textContent = `${formatCount(status.ruleCount ?? 0)} 条`;
-  elements.enhancedWhitelistHealthState.innerHTML = `
-    <span class="state-chip state-chip-${state.tone}">
-      ${iconMarkup(state.icon)}<span>${state.label}</span>
-    </span>
-  `;
-  elements.enhancedWhitelistHealthDetail.textContent = details.join(' · ') || '尚无更新记录';
-}
-
 function loadLists({ force = false, read = null } = {}) {
   if (disposed || (!force && listsLoaded)) return Promise.resolve();
   if (listsLoading) return listsLoadPromise ?? Promise.resolve();
@@ -1070,9 +994,7 @@ function loadLists({ force = false, read = null } = {}) {
   elements.manualBlocklist.disabled = true;
   elements.manualAllowlist.disabled = true;
   elements.saveListsButton.disabled = true;
-  syncEnhancedWhitelistControls(true);
   elements.listSyncNote.textContent = '正在读取';
-  elements.enhancedWhitelistSyncNote.textContent = '正在读取';
   listsLoadPromise = (async () => {
     try {
       for (let attempt = 0; attempt < LIST_READ_MAX_ATTEMPTS; attempt += 1) {
@@ -1087,26 +1009,19 @@ function loadLists({ force = false, read = null } = {}) {
             throw new Error('名单配置仍在同步，请稍后重试');
           }
           elements.listSyncNote.textContent = '配置已更新，正在重读';
-          elements.enhancedWhitelistSyncNote.textContent = '配置已更新，正在重读';
           continue;
         }
         elements.manualBlocklist.value = Array.isArray(data?.block) ? data.block.join('\n') : '';
         elements.manualAllowlist.value = Array.isArray(data?.allow) ? data.allow.join('\n') : '';
-        const enhanced = data?.enhancedWhitelist || {};
-        setEnhancedWhitelistEnabled(Boolean(enhanced.enabled));
-        elements.enhancedWhitelistUrl.value = typeof enhanced.url === 'string' ? enhanced.url : '';
         listsRevision = data.revision;
         listsLoaded = true;
         renderListCounts(data?.blockCount ?? 0, data?.allowCount ?? 0);
         renderListErrors();
-        renderEnhancedWhitelistErrors();
         elements.listSyncNote.textContent = '';
-        elements.enhancedWhitelistSyncNote.textContent = '';
         return;
       }
     } catch (error) {
       elements.listSyncNote.textContent = '读取失败';
-      elements.enhancedWhitelistSyncNote.textContent = '读取失败';
       showNotice(error?.message || '黑白名单读取失败', { persistent: true, tone: 'danger' });
     } finally {
       listsLoading = false;
@@ -1115,7 +1030,6 @@ function loadLists({ force = false, read = null } = {}) {
       elements.manualBlocklist.disabled = disabled;
       elements.manualAllowlist.disabled = disabled;
       elements.saveListsButton.disabled = disabled;
-      syncEnhancedWhitelistControls(disabled);
     }
   })();
   return listsLoadPromise;
@@ -1133,20 +1047,6 @@ async function saveLists() {
   await runMutation('set-lists', [encodeBase64Utf8(block.text), encodeBase64Utf8(allow.text)]);
 }
 
-async function saveEnhancedWhitelist() {
-  if (!initialized || !managementUnlocked || currentStatus?.busy || listsLoading) return;
-  const enabled = enhancedWhitelistIsEnabled();
-  const url = validateEnhancedWhitelistUrl(elements.enhancedWhitelistUrl.value, enabled);
-  renderEnhancedWhitelistErrors(url.error || '');
-  if (url.error) return;
-  elements.enhancedWhitelistUrl.value = url.value;
-  await runMutation('set-enhanced-whitelist', [
-    enabled ? '1' : '0',
-    url.value ? encodeBase64Utf8(url.value) : '',
-    '',
-  ]);
-}
-
 function renderStatus(status) {
   if (!status || typeof status !== 'object') return;
   currentStatus = status;
@@ -1155,7 +1055,6 @@ function renderStatus(status) {
   setHeaderPresentation(statusPresentation(status));
   elements.ruleCount.textContent = formatCount(status.ruleCount);
   renderListCounts(status.manualBlockCount ?? 0, status.manualAllowCount ?? 0);
-  renderEnhancedWhitelistStatus(status.enhancedWhitelist);
   renderAutoRefresh(status.autoRefresh);
   if (listsLoaded && listsRevision !== status.desiredSourcesRevision && !status.busy) {
     listsLoaded = false;
@@ -1251,7 +1150,6 @@ function renderStatus(status) {
   if (dohStatus) applyDohHeaderPresentation();
   refreshIcons(elements.headerStatus);
   refreshIcons(elements.overviewSources);
-  refreshIcons(elements.enhancedWhitelistHealthState);
   refreshIcons(elements.rollbackButton);
 }
 
@@ -1890,7 +1788,7 @@ async function loadAppPolicy({ force = false } = {}) {
       return;
     }
     const families = Array.isArray(capability?.families) ? capability.families.join(' / ') : 'IPv4';
-    elements.appPolicyStatus.textContent = policy?.enabled ? '应用策略已启用' : '应用策略默认关闭';
+    elements.appPolicyStatus.textContent = policy?.enabled ? '应用联网策略已启用' : '应用联网策略';
     elements.appPolicyDetail.textContent = `支持 ${families}；共享 UID、VPN/TUN、应用自带 DoH 可能影响策略效果。`;
     elements.appPolicyMode.value = policy?.enabled ? (policy?.mode || 'block_selected') : 'off';
     elements.appPolicyUids.value = Array.isArray(policy?.uids) ? policy.uids.join('\n') : '';
@@ -1997,6 +1895,14 @@ async function runMutation(verb, args = []) {
         showNotice(`${mutationLabel}完成`, { tone: 'success' });
         historyLoaded = false;
         await loadHistory({ reset: true });
+        // 开启后后端还要装 NFLOG 规则并起读取进程，history-status 可能滞后一两拍。
+        // 这里做有界重试，避免界面一直停在“开启拦截历史后显示记录”，逼用户去动筛选条件。
+        for (let attempt = 0; args?.[0] === '1' && attempt < 4
+          && !historyStatus?.enabled && historyPanelActive && !disposed; attempt += 1) {
+          await sleep(400);
+          historyLoaded = false;
+          await loadHistory({ reset: true });
+        }
       }
     } else if (verb === 'clear-cache') {
       // 清理缓存不动规则，所以这里不看 sourcesOutOfSync，只看这次操作自己的结果。
@@ -2018,7 +1924,7 @@ async function runMutation(verb, args = []) {
     } else {
       showMutationResult(verb, finalStatus);
     }
-    if ((verb === 'set-lists' || verb === 'set-enhanced-whitelist' || verb === 'set-domain-decision')
+    if ((verb === 'set-lists' || verb === 'set-domain-decision')
       && finalStatus.result !== 'failed' && finalStatus.result !== 'critical') {
       listsLoaded = false;
       await loadLists({ force: true });
@@ -2993,7 +2899,9 @@ async function loadHistory({ reset = false, refreshMetadata = reset } = {}) {
     if (!historyStatus?.enabled) {
       historyCursor = '0';
       historyHasMore = false;
-      historyLoaded = true;
+      // 不要在这里把 historyLoaded 置为已加载：开启动作刚提交时后端可能还没翻转状态，
+      // latch 住之后重新进入页签也不会重试，用户就只能靠改筛选条件才能看到记录。
+      historyLoaded = false;
       elements.historyList.innerHTML = '<p class="empty-state">开启拦截历史后显示记录</p>';
       elements.loadMoreHistory.hidden = true;
       return;
@@ -3160,18 +3068,6 @@ function setupInteractions() {
 
   elements.addSourceButton.addEventListener('click', () => openSourceDialog());
   elements.saveListsButton.addEventListener('click', saveLists);
-  elements.saveEnhancedWhitelistButton.addEventListener('click', saveEnhancedWhitelist);
-  elements.enhancedWhitelistEnabled.addEventListener('click', () => {
-    setEnhancedWhitelistEnabled(!enhancedWhitelistIsEnabled());
-    renderEnhancedWhitelistErrors();
-  });
-  elements.enhancedWhitelistUrl.addEventListener('input', () => {
-    const result = validateEnhancedWhitelistUrl(
-      elements.enhancedWhitelistUrl.value,
-      enhancedWhitelistIsEnabled(),
-    );
-    renderEnhancedWhitelistErrors(result.error || '');
-  });
   for (const input of [elements.manualBlocklist, elements.manualAllowlist]) {
     input.addEventListener('input', () => {
       debounce('manual-lists-validate', () => {

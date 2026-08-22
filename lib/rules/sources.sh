@@ -28,10 +28,6 @@ source_cache_path() {
   case "$id" in
     awa) SOURCE_CACHE_PATH="$CACHE_DIR/awa.hosts" ;;
     rule10007) SOURCE_CACHE_PATH="$CACHE_DIR/rule10007.hosts" ;;
-    enhanced_whitelist)
-      hash=$(printf '%s' "$url" | sha256_file_stdin)
-      SOURCE_CACHE_PATH="$CACHE_DIR/enhanced-whitelist/$hash.hosts"
-      ;;
     custom_[1-9]*)
       suffix=${id#custom_}
       case "$suffix" in *[!0-9]*) return 65 ;; esac
@@ -84,7 +80,7 @@ source_diagnostics_write() {
     [ -n "${priority}${id}${kind}${enabled}${state}${updated}${count}${sha}${url_sha}${path}${allow_count}${skipped_count}${allow_path}${source_error}${extra}" ]; do
     [ -n "$id" ] || continue
     [ -z "$extra" ] || { rm -f "$tmp"; return 65; }
-    case "$id" in awa|rule10007|enhanced_whitelist|custom_[1-9]*) ;; *) rm -f "$tmp"; return 65 ;; esac
+    case "$id" in awa|rule10007|custom_[1-9]*) ;; *) rm -f "$tmp"; return 65 ;; esac
     case "$state" in fresh|stale|error|disabled) ;; *) rm -f "$tmp"; return 65 ;; esac
     case "$source_error" in ''|null|unsupported_format|source_unavailable|download_failed_using_cache) ;; *) rm -f "$tmp"; return 65 ;; esac
     if [ "$url_sha" != null ]; then
@@ -100,23 +96,6 @@ source_diagnostics_write() {
       return 74
     }
   done < "$source_file"
-  if [ -n "${SOURCE_ENHANCED_DIAGNOSTIC_FILE-}" ] && [ -f "$SOURCE_ENHANCED_DIAGNOSTIC_FILE" ]; then
-    id=enhanced_whitelist
-    url_sha=$("$BB" awk -F= '$1=="url_sha256"{print $2}' "$SOURCE_ENHANCED_DIAGNOSTIC_FILE") || { rm -f "$tmp"; return 65; }
-    state=$("$BB" awk -F= '$1=="state"{print $2}' "$SOURCE_ENHANCED_DIAGNOSTIC_FILE") || { rm -f "$tmp"; return 65; }
-    source_error=$("$BB" awk -F= '$1=="error"{print $2}' "$SOURCE_ENHANCED_DIAGNOSTIC_FILE") || { rm -f "$tmp"; return 65; }
-    count=$("$BB" awk -F= '$1=="rule_count"{print $2}' "$SOURCE_ENHANCED_DIAGNOSTIC_FILE") || { rm -f "$tmp"; return 65; }
-    skipped_count=$("$BB" awk -F= '$1=="skipped_count"{print $2}' "$SOURCE_ENHANCED_DIAGNOSTIC_FILE") || { rm -f "$tmp"; return 65; }
-    updated=$("$BB" awk -F= '$1=="updated_at"{print $2}' "$SOURCE_ENHANCED_DIAGNOSTIC_FILE") || { rm -f "$tmp"; return 65; }
-    case "$state" in fresh|stale|error|disabled) ;; *) rm -f "$tmp"; return 65 ;; esac
-    case "$source_error" in null|unsupported_format|source_unavailable|download_failed_using_cache) ;; *) rm -f "$tmp"; return 65 ;; esac
-    case "$url_sha" in null|[0-9a-f][0-9a-f]*) ;; *) rm -f "$tmp"; return 65 ;; esac
-    case "$count:$skipped_count:$updated" in *[!0-9:]*) rm -f "$tmp"; return 65 ;; esac
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$url_sha" "$state" "$source_error" "$count" "$skipped_count" "$updated" >> "$tmp" || {
-      rm -f "$tmp"
-      return 74
-    }
-  fi
   atomic_replace_file "$tmp" "$RULE_RUNTIME/source-diagnostics.tsv"
 }
 
@@ -234,26 +213,6 @@ normalize_custom_source() {
   export CUSTOM_BLOCK_COUNT CUSTOM_ALLOW_COUNT CUSTOM_RULE_COUNT CUSTOM_SKIPPED_COUNT
 }
 
-normalize_enhanced_whitelist_source() {
-  local input output block allow tmp
-  input=$1
-  output=$2
-  block="$RULE_TMP/enhanced-block.$$.tsv"
-  allow="$RULE_TMP/enhanced-allow.$$.txt"
-  tmp="$output.tmp.$$"
-  normalize_custom_source "$input" "$block" "$allow" || return
-  {
-    "$BB" awk -F '\t' 'NF==2{print $1}' "$block"
-    cat "$allow"
-  } | LC_ALL=C "$BB" sort -u > "$tmp" || { rm -f "$block" "$allow" "$tmp"; return 74; }
-  [ -s "$tmp" ] || { rm -f "$block" "$allow" "$tmp"; return 65; }
-  atomic_replace_file "$tmp" "$output" || { rm -f "$block" "$allow"; return; }
-  ENHANCED_WHITELIST_RULE_COUNT=$CUSTOM_RULE_COUNT
-  ENHANCED_WHITELIST_SKIPPED_COUNT=$CUSTOM_SKIPPED_COUNT
-  export ENHANCED_WHITELIST_RULE_COUNT ENHANCED_WHITELIST_SKIPPED_COUNT
-  rm -f "$block" "$allow"
-}
-
 validate_non_zip_source() {
   local file=$1 magic
   [ -f "$file" ] || return 66
@@ -296,26 +255,8 @@ validate_custom_download() {
   export VALIDATE_RULE_COUNT VALIDATE_ALLOW_COUNT VALIDATE_SKIPPED_COUNT VALIDATE_ALLOW_PATH
 }
 
-validate_enhanced_whitelist_download() {
-  local file=$1 normalized=$2 bytes
-  [ -f "$file" ] || return 66
-  bytes=$(wc -c < "$file" | tr -d ' ')
-  [ "$bytes" -gt 0 ] && [ "$bytes" -le "$SOURCE_MAX_BYTES" ] || return 65
-  validate_non_zip_source "$file" || return 65
-  if "$BB" head -c 256 "$file" | LC_ALL=C grep -Eiq '^[[:space:]]*<(html|!doctype|xml)'; then
-    return 65
-  fi
-  normalize_enhanced_whitelist_source "$file" "$normalized" || return 65
-  VALIDATE_RULE_COUNT=$ENHANCED_WHITELIST_RULE_COUNT
-  VALIDATE_ALLOW_COUNT=0
-  VALIDATE_SKIPPED_COUNT=$ENHANCED_WHITELIST_SKIPPED_COUNT
-  VALIDATE_ALLOW_PATH=-
-  export VALIDATE_RULE_COUNT VALIDATE_ALLOW_COUNT VALIDATE_SKIPPED_COUNT VALIDATE_ALLOW_PATH
-}
-
 validate_source_download() {
   case "$1" in
-    enhanced_whitelist) validate_enhanced_whitelist_download "$2" "$3" ;;
     custom_[1-9]*) validate_custom_download "$2" "$3" ;;
     *)
       validate_download "$2" "$3" || return
@@ -541,20 +482,12 @@ load_source_cache() {
 
 source_refresh_target_validate() {
   [ "$#" -eq 2 ] || return 64
-  local revision=$1 target=$2 enabled sources
+  local revision=$1 target=$2 sources
   [ -n "$target" ] || return 0
-  case "$target" in
-    enhanced_whitelist)
-      enabled=$(config_enhanced_whitelist_value "$revision" enabled) || return
-      [ "$enabled" = 1 ] && [ -n "$(config_enhanced_whitelist_url "$revision")" ] || return 65
-      ;;
-    *)
-      source_registry_id_valid "$target" || return 65
-      sources="$CONFIG_DIR/revisions/$revision/sources.tsv"
-      source_registry_validate_file "$sources" || return
-      "$BB" awk -F '\t' -v wanted="$target" '$1==wanted && $3==1{found=1} END{exit found?0:1}' "$sources" || return 65
-      ;;
-  esac
+  source_registry_id_valid "$target" || return 65
+  sources="$CONFIG_DIR/revisions/$revision/sources.tsv"
+  source_registry_validate_file "$sources" || return
+  "$BB" awk -F '\t' -v wanted="$target" '$1==wanted && $3==1{found=1} END{exit found?0:1}' "$sources" || return 65
 }
 
 source_fetch_or_load_cache() {
@@ -628,46 +561,6 @@ fetch_enabled_sources() {
       failures=$((failures + 1))
     fi
   done < "$sources"
-  enhanced_meta="$workdir/enhanced-whitelist.prop"
-  enhanced_enabled=$(config_enhanced_whitelist_value "$current" enabled) || return
-  enhanced_url=$(config_enhanced_whitelist_url "$current") || return
-  if [ -n "$enhanced_url" ]; then
-    enhanced_url_sha=$(printf '%s' "$enhanced_url" | sha256_file_stdin) || return
-  else
-    enhanced_url_sha=null
-  fi
-  if [ "$enhanced_enabled" = 0 ]; then
-    {
-      printf 'enabled=0\n'
-      printf 'url_sha256=%s\n' "$enhanced_url_sha"
-      printf 'state=disabled\nupdated_at=0\nrule_count=0\nskipped_count=0\nerror=null\n'
-    } > "$enhanced_meta" || return 74
-  else
-    enhanced_raw="$workdir/enhanced-whitelist.raw"
-    enhanced_domains="$workdir/enhanced-whitelist-domains.txt"
-    if source_fetch_or_load_cache "$target_id" enhanced_whitelist "$enhanced_url" "$enhanced_raw" "$enhanced_domains"; then
-      [ -n "$FETCH_ERROR" ] && source_error=$FETCH_ERROR || source_error=null
-      updated_at=$(source_refresh_updated_at "$target_id" enhanced_whitelist "$enhanced_url_sha") || return
-      {
-        printf 'enabled=1\n'
-        printf 'url_sha256=%s\n' "$enhanced_url_sha"
-        printf 'state=%s\nupdated_at=%s\nrule_count=%s\nskipped_count=%s\nerror=%s\n' \
-          "$FETCH_STATE" "$updated_at" "$FETCH_RULE_COUNT" "$FETCH_SKIPPED_COUNT" "$source_error"
-      } > "$enhanced_meta" || return 74
-    else
-      updated_at=$(source_refresh_updated_at "$target_id" enhanced_whitelist "$enhanced_url_sha") || return
-      {
-        printf 'enabled=1\n'
-        printf 'url_sha256=%s\n' "$enhanced_url_sha"
-        printf 'state=%s\nupdated_at=%s\nrule_count=0\nskipped_count=%s\nerror=%s\n' \
-          "$FETCH_STATE" "$updated_at" "$FETCH_SKIPPED_COUNT" "$FETCH_ERROR"
-      } > "$enhanced_meta" || return 74
-      failures=$((failures + 1))
-    fi
-  fi
-  SOURCE_ENHANCED_DIAGNOSTIC_FILE="$enhanced_meta"
-  export SOURCE_ENHANCED_DIAGNOSTIC_FILE
   source_diagnostics_write "$workdir/sources.tsv" || return 74
-  unset SOURCE_ENHANCED_DIAGNOSTIC_FILE
   [ "$failures" -eq 0 ] || return 69
 }

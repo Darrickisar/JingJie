@@ -27,7 +27,7 @@ generation_cleanup_outputs() {
 }
 
 build_generation() {
-  local work=$1 rev=$2 rules_dir tmp base_norm recovery_norm records merged reward_domains whitelist_domains remote_allow_domains manual_blocklist manual_allowlist enhanced_config enhanced_enabled enhanced_url enhanced_url_sha enhanced_meta enhanced_state enhanced_updated enhanced_rule_count enhanced_skipped_count enhanced_error enhanced_domains result
+  local work=$1 rev=$2 rules_dir tmp base_norm recovery_norm records merged reward_domains whitelist_domains remote_allow_domains manual_blocklist manual_allowlist result
   local all_rows reward_rows all_filtered reward_filtered overrides_file all_overridden reward_overridden all_count reward_count max_domains max_bytes
   case "$rev" in ''|*[!0-9]*) return 65 ;; esac
   rules_dir=${RULES_DIR:-$MODDIR/rules}
@@ -49,48 +49,10 @@ build_generation() {
   : > "$remote_allow_domains"
   manual_blocklist="$CONFIG_DIR/revisions/$rev/manual-blocklist.txt"
   manual_allowlist="$CONFIG_DIR/revisions/$rev/manual-allowlist.txt"
-  enhanced_config="$CONFIG_DIR/revisions/$rev/enhanced-whitelist.conf"
   if [ -f "$manual_blocklist" ] && [ -f "$manual_allowlist" ]; then
     "$BB" awk 'NF{print "999999\t" $1 "\t0.0.0.0"}' "$manual_blocklist" >> "$records" || { rm -rf "$tmp"; return 74; }
   fi
-  if [ -f "$enhanced_config" ]; then
-    command -v config_enhanced_whitelist_value >/dev/null 2>&1 || { rm -rf "$tmp"; return 70; }
-    enhanced_enabled=$(config_enhanced_whitelist_value "$rev" enabled) || { rm -rf "$tmp"; return 65; }
-    enhanced_url=$(config_enhanced_whitelist_url "$rev") || { rm -rf "$tmp"; return 65; }
-    if [ -n "$enhanced_url" ]; then
-      enhanced_url_sha=$(printf '%s' "$enhanced_url" | sha256_file_stdin) || {
-        result=$?
-        rm -rf "$tmp"
-        return "$result"
-      }
-    else
-      enhanced_url_sha=null
-    fi
-  else
-    enhanced_enabled=0
-    enhanced_url_sha=null
-  fi
-  enhanced_state=disabled
-  enhanced_updated=0
-  enhanced_rule_count=0
-  enhanced_skipped_count=0
-  enhanced_error=null
-  enhanced_domains="$work/enhanced-whitelist-domains.txt"
-  if [ "$enhanced_enabled" = 1 ]; then
-    enhanced_meta="$work/enhanced-whitelist.prop"
-    [ -f "$enhanced_meta" ] && [ -f "$enhanced_domains" ] || { rm -rf "$tmp"; return 66; }
-    enhanced_state=$("$BB" awk -F= '$1=="state"{print $2}' "$enhanced_meta") || { rm -rf "$tmp"; return 65; }
-    enhanced_updated=$("$BB" awk -F= '$1=="updated_at"{print $2}' "$enhanced_meta") || { rm -rf "$tmp"; return 65; }
-    enhanced_rule_count=$("$BB" awk -F= '$1=="rule_count"{print $2}' "$enhanced_meta") || { rm -rf "$tmp"; return 65; }
-    enhanced_skipped_count=$("$BB" awk -F= '$1=="skipped_count"{print $2}' "$enhanced_meta") || { rm -rf "$tmp"; return 65; }
-    enhanced_error=$("$BB" awk -F= '$1=="error"{print $2}' "$enhanced_meta") || { rm -rf "$tmp"; return 65; }
-    case "$enhanced_state:$enhanced_error" in
-      fresh:null|stale:download_failed_using_cache) ;;
-      *) rm -rf "$tmp"; return 65 ;;
-    esac
-    case "$enhanced_updated:$enhanced_rule_count:$enhanced_skipped_count" in *[!0-9:]*) rm -rf "$tmp"; return 65 ;; esac
-  fi
-
+  # 把每个启用来源的归一化规则按优先级并入候选集；来源自带的例外规则进入最终放行名单。
   local priority id kind enabled state updated count sha url_sha path allow_count skipped_count allow_path source_error extra
   while IFS="$(printf '\t')" read -r priority id kind enabled state updated count sha url_sha path allow_count skipped_count allow_path source_error extra || \
     [ -n "${priority}${id}${kind}${enabled}${state}${updated}${count}${sha}${url_sha}${path}${allow_count}${skipped_count}${allow_path}${source_error}${extra}" ]; do
@@ -109,7 +71,6 @@ build_generation() {
       cat "$allow_path" >> "$remote_allow_domains" || { rm -rf "$tmp"; return 74; }
     fi
   done < "$work/sources.tsv"
-
   merged="$tmp/merged.tsv"
   LC_ALL=C "$BB" sort -t "$(printf '\t')" -k2,2 -k1,1nr -k3,3 "$records" | \
     "$BB" awk -F '\t' '
@@ -129,9 +90,6 @@ build_generation() {
   {
     "$BB" awk -F '\t' '!seen[$1]++{print $1}' "$tmp/whitelist-records.tsv"
     cat "$remote_allow_domains"
-    if [ "$enhanced_enabled" = 1 ]; then
-      cat "$enhanced_domains"
-    fi
   } | LC_ALL=C "$BB" sort -u > "$whitelist_domains"
 
   all_rows="$tmp/all-rows.tsv"
@@ -164,6 +122,19 @@ build_generation() {
   if [ "$all_count" -gt "$max_domains" ] || [ "$reward_count" -gt "$max_domains" ]; then
     rm -rf "$tmp"
     return 65
+  fi
+  # 「全部模块事件」档位下把这一代的放行/拦截明细写进规则日志，
+  # 用户才能核对白名单、来源例外和奖励广告例外到底放行了什么。
+  if command -v log_verbose_event >/dev/null 2>&1; then
+    local allow_total manual_allow_count remote_allow_count reward_exception_count
+    allow_total=$("$BB" awk 'NF{count++} END{print count+0}' "$whitelist_domains" 2>/dev/null) || allow_total=0
+    manual_allow_count=$("$BB" awk 'NF{count++} END{print count+0}' "$tmp/whitelist-records.tsv" 2>/dev/null) || manual_allow_count=0
+    remote_allow_count=$("$BB" awk 'NF{count++} END{print count+0}' "$remote_allow_domains" 2>/dev/null) || remote_allow_count=0
+    reward_exception_count=$("$BB" awk 'NF{count++} END{print count+0}' "$reward_domains" 2>/dev/null) || reward_exception_count=0
+    log_verbose_event info generation_allowed \
+      "放行 $allow_total 个域名：白名单 $manual_allow_count、来源例外 $remote_allow_count；奖励广告例外 $reward_exception_count" || true
+    log_verbose_event info generation_blocked \
+      "拦截 $all_count 个域名（保留奖励广告模式 $reward_count 个）" || true
   fi
 
   generation_rows_to_hosts "$all_filtered" "$tmp/all"
@@ -198,13 +169,6 @@ build_generation() {
     printf 'reward_sha256=%s\n' "$reward_hash"
     printf 'all_rule_count=%s\n' "$all_count"
     printf 'reward_rule_count=%s\n' "$reward_count"
-    printf 'enhanced_whitelist_enabled=%s\n' "$enhanced_enabled"
-    printf 'enhanced_whitelist_url_sha256=%s\n' "$enhanced_url_sha"
-    printf 'enhanced_whitelist_state=%s\n' "$enhanced_state"
-    printf 'enhanced_whitelist_rule_count=%s\n' "$enhanced_rule_count"
-    printf 'enhanced_whitelist_skipped_count=%s\n' "$enhanced_skipped_count"
-    printf 'enhanced_whitelist_updated_at=%s\n' "$enhanced_updated"
-    printf 'enhanced_whitelist_error=%s\n' "$enhanced_error"
     printf 'source_count=%s\n' "$source_count"
   } > "$manifest" || { rm -rf "$tmp"; return 74; }
 

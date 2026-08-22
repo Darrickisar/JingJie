@@ -132,7 +132,6 @@ worker_run_engine() {
     set-log-mode) preferences_set_log_mode "$OPERATION_ARG_1" ;;
     set-app-policy) app_policy_apply "$OPERATION_ARG_1" "$OPERATION_ARG_2" "$OPERATION_ARG_3" ;;
     set-lists) worker_exec_engine set-lists "$OPERATION_ARG_1" "$OPERATION_ARG_2" ;;
-    set-enhanced-whitelist) worker_exec_engine set-enhanced-whitelist "$OPERATION_ARG_1" "$OPERATION_ARG_2" "$OPERATION_ARG_3" ;;
     set-domain-decision) worker_exec_engine set-domain-decision "$OPERATION_ARG_1" "$OPERATION_ARG_2" ;;
     select-mode) worker_exec_engine select "$OPERATION_ARG_1" ;;
     pause) worker_pause_transaction ;;
@@ -156,7 +155,7 @@ worker_run_engine() {
     return "$result"
   fi
   case "$OPERATION_VERB" in
-    refresh|refresh-source|set-builtin|add-source|update-source|set-source|move-source|remove-source|set-overrides|reset-rules|set-lists|set-enhanced-whitelist|set-domain-decision|select-mode|rollback)
+    refresh|refresh-source|set-builtin|add-source|update-source|set-source|move-source|remove-source|set-overrides|reset-rules|set-lists|set-domain-decision|select-mode|rollback)
       if ! worker_effective_mode_paused; then
         worker_exec_history reconcile || {
           result=$?
