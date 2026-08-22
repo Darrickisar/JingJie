@@ -1,0 +1,3 @@
+# Connectivity-neutral bootstrap. Online sources are applied only after an explicit refresh.
+127.0.0.1 localhost
+::1 localhost

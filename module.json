@@ -1,0 +1,29 @@
+{
+  "id": "jingjie_hosts",
+  "name": "净界",
+  "version": "V1.0",
+  "versionCode": 670,
+  "author": "相貌平平韩老魔",
+  "license": "GPL-3.0-only",
+  "summary": {
+    "zh": "面向 KernelSU、KernelSU Next 与 APatch 的低耗电 hosts 过滤模块，支持可选 DoH、规则管理与版本回滚。",
+    "en": "A low-power hosts filtering module for KernelSU, KernelSU Next and APatch, with optional DoH, rule-source management and version rollback."
+  },
+  "description": "净界：面向 KernelSU、KernelSU Next 与 APatch 的低耗电过滤模块，支持 hosts、可选 DoH、规则管理和回滚。",
+  "root": ["KernelSU", "KernelSU Next", "APatch"],
+  "homepage": "https://github.com/Darrickisar/JingJie",
+  "source": "https://github.com/Darrickisar/JingJie",
+  "support": "https://github.com/Darrickisar/JingJie/issues",
+  "readme": "https://raw.githubusercontent.com/Darrickisar/JingJie/main/README.md",
+  "icon": "https://raw.githubusercontent.com/Darrickisar/JingJie/main/logo.png",
+  "updateJson": "https://raw.githubusercontent.com/Darrickisar/JingJie/main/update.json",
+  "zipUrl": "https://github.com/Darrickisar/JingJie/releases/download/v1.0/JingJie-V1.0.zip",
+  "changelog": "https://raw.githubusercontent.com/Darrickisar/JingJie/main/docs/release/v1.0.md",
+  "features": {
+    "webui": true,
+    "postFsData": true,
+    "service": true,
+    "action": false,
+    "zygisk": false
+  }
+}

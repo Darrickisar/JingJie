@@ -1,0 +1,1018 @@
+<!doctype html>
+<html lang="zh-CN" data-surface="classic" data-scheme="system" data-glass="soft" data-motion="auto" data-background="off">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>净界 · 规则控制台</title>
+    <link rel="stylesheet" href="./internal/insets.css">
+    <link rel="stylesheet" href="./app.css">
+  </head>
+  <body>
+    <!--
+      THESIS: 净界 5.0 是安静可信的系统级防护平台，状态优先、数据卡片化、操作胶囊化。
+      OWN-WORLD: 三主题体系（经典 / 暗色 / 液态玻璃）共用同一套语义令牌；液态玻璃提供半透明层、柔光光斑与高光边缘。
+      STORY: 用户先确认保护状态与规则规模，再进入规则、应用、日志逐层处理，最后在设置里调整外观与偏好。
+      FIRST VIEWPORT: 品牌栏保留实时状态，状态 Hero 与关键数据并排，策略工作区与来源健康度随后展开。
+      FORM: 悬浮胶囊底部导航 + 分层卡片；seed key jingjie-console-glass-05。
+      FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+    -->
+    <a class="skip-link" href="#workspace">跳到主要内容</a>
+    <div class="ambient-field" aria-hidden="true">
+      <span class="ambient-photo"></span>
+      <span class="ambient-orb ambient-orb-a"></span>
+      <span class="ambient-orb ambient-orb-b"></span>
+      <span class="ambient-orb ambient-orb-c"></span>
+    </div>
+    <svg class="liquid-filter-defs" width="0" height="0" aria-hidden="true" focusable="false">
+      <filter id="jingjie-liquid-refraction" x="-12%" y="-12%" width="124%" height="124%" color-interpolation-filters="sRGB">
+        <feTurbulence type="fractalNoise" baseFrequency="0.006 0.012" numOctaves="2" seed="9" result="liquid-noise"></feTurbulence>
+        <feGaussianBlur in="liquid-noise" stdDeviation="7" result="liquid-field"></feGaussianBlur>
+        <feDisplacementMap in="SourceGraphic" in2="liquid-field" scale="11" xChannelSelector="R" yChannelSelector="G"></feDisplacementMap>
+      </filter>
+    </svg>
+    <div class="app-shell" id="app" aria-busy="true">
+      <div class="app-chrome" data-liquid-surface>
+        <header class="app-header">
+          <div class="brand-cluster">
+            <div class="brand-block">
+              <div class="brand-mark" aria-hidden="true">
+                <svg class="brand-logo" viewBox="0 0 48 48" focusable="false">
+                  <path class="brand-logo-shield" d="M24 3.5 40 9.4v11.1c0 10.6-6.7 19.2-16 24-9.3-4.8-16-13.4-16-24V9.4z"></path>
+                  <path class="brand-logo-rule" d="M15 17.5h18M15 24h18M15 30.5h10"></path>
+                  <circle class="brand-logo-dot" cx="31.5" cy="30.5" r="2.5"></circle>
+                </svg>
+              </div>
+              <h1>净界</h1>
+            </div>
+            <aside class="project-notice" aria-label="安全说明">
+              <div class="project-origin">
+                <strong>请从官方链接下载，以防恶意脚本</strong>
+                <span>为保障网络环境安全，本工具仅支持过滤非法骚扰、恶意代码等违规信息</span>
+              </div>
+            </aside>
+          </div>
+          <div class="header-tools">
+            <div class="header-status status-tone-danger" id="header-status" role="status">
+              <i data-lucide="shield-x" aria-hidden="true"></i>
+              <span id="header-status-text">未生效</span>
+            </div>
+          </div>
+        </header>
+      </div>
+
+      <main class="workspace" id="workspace">
+        <section class="tab-panel" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
+          <div class="overview-stage">
+            <div class="status-rail" id="status-rail" data-liquid-surface>
+              <div class="status-copy">
+                <h2 id="overview-status">读取中</h2>
+                <p class="muted" id="overview-detail">正在从模块读取真实状态</p>
+              </div>
+            </div>
+
+            <section class="rule-impact" id="rule-impact" aria-label="规则规模、网络影响与更新时间" data-tone="neutral" data-liquid-surface>
+              <div class="rule-impact-copy">
+                <span>规则总量</span>
+                <p id="rule-impact-copy"><strong id="rule-count">—</strong> 条 hosts 规则</p>
+                <small id="rule-impact-hint">超过 50,000 条会轻微影响网络</small>
+              </div>
+              <div class="network-impact-state">
+                <span>网络影响</span>
+                <strong id="network-impact">等待读取</strong>
+              </div>
+              <div class="last-success-state">
+                <span>上次成功</span>
+                <strong id="last-success">—</strong>
+              </div>
+            </section>
+          </div>
+
+          <div class="overview-grid" id="overview-workspace" hidden>
+            <section class="policy-workspace" aria-labelledby="policy-heading" data-liquid-surface>
+              <div class="policy-workspace-heading">
+                <div>
+                  <h2 id="policy-heading">保护策略</h2>
+                  <p>规则模式、更新周期与版本操作集中在这里。</p>
+                </div>
+                <button class="icon-button section-toggle" type="button" aria-controls="policy-layout" data-collapse-label="保护策略" aria-expanded="true" aria-label="收起保护策略" title="收起保护策略">
+                  <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+                </button>
+              </div>
+
+              <div class="policy-layout" id="policy-layout">
+                <section class="content-section mode-section" aria-labelledby="mode-heading">
+                  <div class="section-heading">
+                    <h2 id="mode-heading">全局模式</h2>
+                    <span class="sync-note" id="mode-sync-note"></span>
+                  </div>
+                  <fieldset class="segmented-control" id="mode-control" disabled>
+                    <legend class="visually-hidden">选择全局规则模式</legend>
+                    <label>
+                      <input class="write-action" type="radio" name="mode" value="block_all" disabled>
+                      <span><i data-lucide="shield-ban" aria-hidden="true"></i>拦截全部广告</span>
+                    </label>
+                    <label>
+                      <input class="write-action" type="radio" name="mode" value="preserve_reward" disabled>
+                      <span><i data-lucide="gift" aria-hidden="true"></i>保留奖励广告</span>
+                    </label>
+                  </fieldset>
+                </section>
+
+                <div class="policy-utility">
+                  <section class="refresh-policy" aria-labelledby="auto-refresh-heading">
+                    <div class="refresh-policy-copy">
+                      <span class="refresh-policy-icon" aria-hidden="true"><i data-lucide="calendar-sync"></i></span>
+                      <div>
+                        <h2 id="auto-refresh-heading">自动更新</h2>
+                        <p id="auto-refresh-summary">自动更新已关闭</p>
+                      </div>
+                    </div>
+                    <div class="refresh-policy-controls">
+                      <fieldset class="refresh-interval" id="auto-refresh-interval" hidden disabled>
+                        <legend class="visually-hidden">自动更新周期</legend>
+                        <label>
+                          <input class="write-action" type="radio" name="auto-refresh-interval" value="6" disabled>
+                          <span>6 小时</span>
+                        </label>
+                        <label>
+                          <input class="write-action" type="radio" name="auto-refresh-interval" value="12" disabled>
+                          <span>12 小时</span>
+                        </label>
+                        <label>
+                          <input class="write-action" type="radio" name="auto-refresh-interval" value="24" disabled>
+                          <span>24 小时</span>
+                        </label>
+                      </fieldset>
+                      <label class="switch-label auto-refresh-switch" title="自动刷新规则">
+                        <span class="visually-hidden">自动刷新规则</span>
+                        <input class="source-switch write-action" id="auto-refresh-enabled" type="checkbox" role="switch" aria-label="自动刷新规则" aria-controls="auto-refresh-interval" aria-expanded="false" disabled>
+                        <span class="source-toggle" aria-hidden="true">
+                          <span class="source-toggle-box"></span>
+                          <span class="source-toggle-label source-toggle-on">已开启</span>
+                          <span class="source-toggle-label source-toggle-off">已关闭</span>
+                        </span>
+                      </label>
+                    </div>
+                  </section>
+
+                  <div class="action-row">
+                    <button class="button button-secondary write-action" id="clear-cache-button" type="button" disabled>
+                      <i data-lucide="trash-2" aria-hidden="true"></i>
+                      <span>清理缓存</span>
+                    </button>
+                    <button class="button button-primary write-action" id="refresh-button" type="button" disabled>
+                      <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                      <span>立即刷新</span>
+                    </button>
+                    <button class="button button-secondary write-action protection-action" id="pause-protection-button" type="button" disabled>
+                      <i data-lucide="circle-pause" aria-hidden="true"></i>
+                      <span>暂停保护</span>
+                    </button>
+                    <button class="button button-primary write-action protection-action" id="resume-protection-button" type="button" hidden disabled>
+                      <i data-lucide="shield-check" aria-hidden="true"></i>
+                      <span>恢复保护</span>
+                    </button>
+                    <button class="button button-secondary write-action" id="rollback-button" type="button" hidden disabled>
+                      <i class="rollback-icon" data-lucide="rotate-ccw" aria-hidden="true"></i>
+                      <span>回滚上一版</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="content-section health-section" aria-labelledby="health-heading" data-liquid-surface>
+              <div class="section-heading">
+                <h2 id="health-heading">来源健康度</h2>
+                <button class="icon-button section-toggle" type="button" aria-controls="overview-sources" data-collapse-label="来源健康度" aria-expanded="true" aria-label="收起来源健康度" title="收起来源健康度">
+                  <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+                </button>
+              </div>
+              <div class="health-list" id="overview-sources" aria-live="polite"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="panel-sources" role="tabpanel" aria-labelledby="tab-sources" hidden>
+          <div class="panel-heading">
+            <h2>规则来源</h2>
+            <button class="button button-primary write-action" id="add-source-button" type="button" disabled>
+              <i data-lucide="plus" aria-hidden="true"></i>
+              <span>添加规则</span>
+            </button>
+          </div>
+          <div class="source-workspace" id="source-workspace">
+            <section class="source-directory" aria-label="来源目录" data-liquid-surface>
+              <div class="source-catalog">
+                <section class="source-group" aria-labelledby="builtin-heading">
+                  <div class="source-group-heading">
+                    <h3 id="builtin-heading">内置来源</h3>
+                    <button class="icon-button section-toggle source-group-toggle" id="builtin-sources-toggle" type="button" data-collapse-label="内置来源" aria-controls="builtin-sources-content" aria-expanded="true" aria-label="收起内置来源" title="收起内置来源">
+                      <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+                    </button>
+                  </div>
+                  <div class="source-group-content" id="builtin-sources-content">
+                    <div class="source-list" id="builtin-sources"></div>
+                    <div class="builtin-recovery" id="builtin-recovery" hidden aria-live="polite"></div>
+                  </div>
+                </section>
+                <section class="source-group" aria-labelledby="custom-heading">
+                  <div class="source-group-heading">
+                    <h3 id="custom-heading">自定义来源</h3>
+                    <button class="icon-button section-toggle source-group-toggle" id="custom-sources-toggle" type="button" data-collapse-label="自定义来源" aria-controls="custom-sources-content" aria-expanded="true" aria-label="收起自定义来源" title="收起自定义来源">
+                      <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+                    </button>
+                  </div>
+                  <div class="source-group-content" id="custom-sources-content">
+                    <div class="source-list" id="custom-sources"></div>
+                  </div>
+                </section>
+              </div>
+            </section>
+            <aside class="policy-grid" aria-label="名单策略">
+          <section class="list-editor override-editor" aria-labelledby="override-heading" data-liquid-surface>
+            <div class="section-heading">
+              <div>
+                <h3 id="override-heading">精确域名覆写</h3>
+                <p class="muted">每行填写“域名 + 空格 + IPv4/IPv6”，作为最终映射；不支持 URL、通配符或保留域名。</p>
+              </div>
+              <span class="list-sync" id="override-sync-note"></span>
+              <button class="icon-button section-toggle" type="button" aria-controls="override-body" data-collapse-label="精确域名覆写" aria-expanded="true" aria-label="收起精确域名覆写" title="收起精确域名覆写">
+                <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+              </button>
+            </div>
+            <div class="collapsible-body" id="override-body">
+              <label class="list-field" for="domain-overrides">
+                <span class="list-field-heading"><strong>覆写记录</strong><span id="override-count">0 条</span></span>
+                <textarea id="domain-overrides" rows="6" spellcheck="false" autocomplete="off" placeholder="ads.example.com 0.0.0.0"></textarea>
+                <span class="field-error" id="override-error"></span>
+              </label>
+              <div class="list-actions">
+                <button class="button button-primary write-action" id="save-overrides-button" type="button" disabled>
+                  <i data-lucide="save" aria-hidden="true"></i>
+                  <span>保存覆写</span>
+                </button>
+              </div>
+            </div>
+          </section>
+          <section class="enhanced-whitelist-editor" aria-labelledby="enhanced-whitelist-heading" data-liquid-surface>
+            <div class="enhanced-whitelist-heading">
+              <div>
+                <h3 id="enhanced-whitelist-heading">白名单订阅</h3>
+                <p class="muted">开启后自动跟随链接更新，匹配域名将从最终拦截规则中放行。</p>
+              </div>
+              <button class="button button-secondary write-action enhanced-whitelist-toggle" id="enhanced-whitelist-enabled" type="button" aria-pressed="false" aria-controls="enhanced-whitelist-fields" aria-expanded="false" aria-label="启用白名单订阅" disabled>
+                <i data-lucide="shield-plus" aria-hidden="true"></i>
+                <span>启用白名单订阅</span>
+              </button>
+              <button class="icon-button section-toggle" type="button" aria-controls="enhanced-whitelist-body" data-collapse-label="白名单订阅" aria-expanded="true" aria-label="收起白名单订阅" title="收起白名单订阅">
+                <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+              </button>
+            </div>
+            <div class="collapsible-body" id="enhanced-whitelist-body">
+              <div class="enhanced-whitelist-health" id="enhanced-whitelist-health" aria-live="polite">
+                <span id="enhanced-whitelist-health-state"><span class="state-chip state-chip-neutral"><i data-lucide="circle-pause" aria-hidden="true"></i><span>未启用</span></span></span>
+                <span id="enhanced-whitelist-health-detail">尚无更新记录</span>
+                <span id="enhanced-whitelist-rule-count">0 条</span>
+              </div>
+              <div class="enhanced-whitelist-fields" id="enhanced-whitelist-fields" hidden>
+                <label class="enhanced-whitelist-field" for="enhanced-whitelist-url">
+                  <span class="list-field-heading"><strong>订阅链接</strong><span>仅支持可直接下载的 HTTPS 文本</span></span>
+                  <input id="enhanced-whitelist-url" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="2048" aria-describedby="enhanced-whitelist-url-error" placeholder="https://example.com/allow.txt" disabled>
+                  <span class="field-error" id="enhanced-whitelist-url-error"></span>
+                </label>
+              </div>
+              <div class="enhanced-whitelist-actions">
+                <span class="list-sync" id="enhanced-whitelist-sync-note"></span>
+                <button class="button button-primary write-action" id="save-enhanced-whitelist-button" type="button" disabled>
+                  <i data-lucide="save" aria-hidden="true"></i>
+                  <span>保存订阅</span>
+                </button>
+              </div>
+            </div>
+          </section>
+          <section class="list-editor" data-liquid-surface>
+            <div class="section-heading">
+              <div>
+                <p class="muted">白名单优先级最高，黑名单用于强制拦截。每行填写一个完整域名。</p>
+              </div>
+              <span class="list-sync" id="list-sync-note"></span>
+              <button class="icon-button section-toggle" type="button" aria-controls="manual-lists-body" data-collapse-label="黑白名单" aria-expanded="true" aria-label="收起黑白名单" title="收起黑白名单">
+                <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+              </button>
+            </div>
+            <div class="collapsible-body" id="manual-lists-body">
+              <div class="list-grid">
+                <label class="list-field" for="manual-allowlist">
+                  <span class="list-field-heading"><strong>白名单</strong><span id="allow-list-count">0 条</span></span>
+                  <textarea id="manual-allowlist" rows="7" spellcheck="false" autocomplete="off" placeholder="login.example.com"></textarea>
+                  <span class="field-error" id="allow-list-error"></span>
+                </label>
+                <label class="list-field" for="manual-blocklist">
+                  <span class="list-field-heading"><strong>黑名单</strong><span id="block-list-count">0 条</span></span>
+                  <textarea id="manual-blocklist" rows="7" spellcheck="false" autocomplete="off" placeholder="ads.example.com"></textarea>
+                  <span class="field-error" id="block-list-error"></span>
+                </label>
+              </div>
+              <div class="list-actions">
+                <button class="button button-primary write-action" id="save-lists-button" type="button" disabled>
+                  <i data-lucide="save" aria-hidden="true"></i>
+                  <span>保存名单</span>
+                </button>
+              </div>
+            </div>
+          </section>
+            </aside>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="panel-apps" role="tabpanel" aria-labelledby="tab-apps" hidden>
+          <div class="panel-heading">
+            <div>
+              <h2>应用联网策略</h2>
+              <p class="muted">默认关闭；仅在能力检测通过且你主动开启时安装模块专属静态规则。</p>
+            </div>
+          </div>
+          <section class="doh-section" id="doh-section" aria-labelledby="doh-heading">
+            <div class="doh-heading">
+              <div>
+                <h2 id="doh-heading">加密 DNS</h2>
+                <p class="muted">默认关闭；启用后使用你填写的 DoH URL，不内置服务商。</p>
+              </div>
+              <span class="state-chip" id="doh-status">等待读取</span>
+              <button class="icon-button section-toggle" type="button" aria-controls="doh-body" data-collapse-label="加密 DNS" aria-expanded="true" aria-label="收起加密 DNS" title="收起加密 DNS">
+                <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+              </button>
+            </div>
+            <div class="collapsible-body doh-body" id="doh-body">
+            <fieldset class="segmented-control doh-mode" id="doh-mode" disabled>
+              <legend class="visually-hidden">选择加密 DNS 模式</legend>
+              <label>
+                <input class="write-action" type="radio" name="doh-mode" value="off" checked disabled>
+                <span><i data-lucide="circle-pause" aria-hidden="true"></i>关闭</span>
+              </label>
+              <label>
+                <input class="write-action" type="radio" name="doh-mode" value="global" disabled>
+                <span><i data-lucide="shield-check" aria-hidden="true"></i>全设备</span>
+              </label>
+              <label>
+                <input class="write-action" type="radio" name="doh-mode" value="selected" disabled>
+                <span><i data-lucide="apps" aria-hidden="true"></i>所选应用</span>
+              </label>
+            </fieldset>
+            <div class="doh-url-row">
+              <label class="doh-field" for="doh-endpoint">
+                <span>DoH URL</span>
+                <input class="write-action" id="doh-endpoint" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="https://dns.example/dns-query" disabled>
+              </label>
+              <button class="button button-secondary write-action" id="doh-test" type="button" disabled>
+                <i data-lucide="gauge" aria-hidden="true"></i>
+                <span>检测</span>
+              </button>
+            </div>
+            <p class="doh-test-result" id="doh-test-result" aria-live="polite"></p>
+            <div class="doh-selected-region" id="doh-selected-region" hidden>
+              <div class="doh-selected-tools">
+                <label class="doh-field" for="doh-app-search">
+                  <span>搜索应用</span>
+                  <input class="write-action" id="doh-app-search" type="search" autocomplete="off" spellcheck="false" placeholder="包名或 UID" disabled>
+                </label>
+              </div>
+              <div class="doh-app-list" id="doh-app-list" aria-live="polite" hidden>
+                <p class="empty-state">切换到所选应用后读取应用列表</p>
+              </div>
+              <button class="button button-secondary" id="doh-load-more-apps" type="button" hidden>加载更多应用</button>
+              <label class="doh-field" for="doh-uids">
+                <span>高级 UID</span>
+                <textarea class="write-action" id="doh-uids" rows="4" spellcheck="false" autocomplete="off" placeholder="每行一个 Android 应用 UID" disabled></textarea>
+              </label>
+            </div>
+            <div class="doh-actions">
+              <button class="button button-primary write-action" id="doh-apply" type="button" disabled>
+                <i data-lucide="save" aria-hidden="true"></i>
+                <span>应用加密 DNS</span>
+              </button>
+              <button class="button button-secondary write-action" id="doh-disable" type="button" disabled>
+                <i data-lucide="circle-pause" aria-hidden="true"></i>
+                <span>关闭加密 DNS</span>
+              </button>
+            </div>
+            </div>
+          </section>
+          <section class="app-policy-card" id="app-policy-card" aria-live="polite" data-liquid-surface>
+            <div class="app-policy-heading">
+              <div class="app-policy-status" id="app-policy-status">正在读取设备能力…</div>
+              <button class="icon-button section-toggle" type="button" aria-controls="app-policy-body" data-collapse-label="应用联网策略" aria-expanded="true" aria-label="收起应用联网策略" title="收起应用联网策略">
+                <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+              </button>
+            </div>
+            <div class="collapsible-body app-policy-body" id="app-policy-body">
+            <p class="muted" id="app-policy-detail">不会启动 VPN、代理或常驻网络进程。</p>
+            <div class="app-policy-controls" id="app-policy-controls" hidden>
+              <label class="field-label" for="app-policy-mode">策略</label>
+              <select id="app-policy-mode" disabled>
+                <option value="off">关闭应用策略</option>
+                <option value="block_selected">阻止所选应用联网</option>
+                <option value="allow_resolved">仅允许最近一次规则解析地址</option>
+              </select>
+              <label class="field-label" for="app-policy-uids">应用 UID（每行一个）</label>
+              <textarea id="app-policy-uids" rows="4" spellcheck="false" placeholder="例如 10123" disabled></textarea>
+              <label class="field-label" for="app-policy-ips">允许地址快照（allow_resolved 模式，每行一个 IP）</label>
+              <textarea id="app-policy-ips" rows="4" spellcheck="false" placeholder="例如 203.0.113.10" disabled></textarea>
+              <button class="button button-primary write-action" id="app-policy-save" type="button" disabled>保存应用策略</button>
+            </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" id="panel-logs" role="tabpanel" aria-labelledby="tab-logs" hidden>
+          <div class="panel-heading">
+            <h2 id="history-panel-heading">拦截历史</h2>
+          </div>
+
+          <section class="maintenance-strip" id="maintenance-strip" aria-labelledby="maintenance-heading" data-liquid-surface>
+            <div class="section-heading">
+              <h3 id="maintenance-heading">运行设置</h3>
+              <button class="icon-button section-toggle" type="button" aria-controls="maintenance-body" data-collapse-label="运行设置" aria-expanded="true" aria-label="收起运行设置" title="收起运行设置">
+                <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+              </button>
+            </div>
+            <div class="collapsible-body maintenance-body" id="maintenance-body">
+            <div class="maintenance-controls">
+              <label for="log-mode-select">
+                <span>日志档位</span>
+                <select id="log-mode-select" disabled>
+                  <option value="off">关闭额外日志</option>
+                  <option value="blocked_error">仅拦截与错误</option>
+                  <option value="all">全部模块事件</option>
+                </select>
+              </label>
+              <button class="button button-secondary write-action" id="save-log-mode-button" type="button" disabled>保存日志档位</button>
+              <button class="button button-secondary" id="diagnostics-button" type="button" disabled>
+                <i data-lucide="gauge" aria-hidden="true"></i>
+                <span>环境检查</span>
+              </button>
+            </div>
+            <div class="danger-zone" id="danger-zone">
+              <div class="danger-zone-copy">
+                <strong><i data-lucide="triangle-alert" aria-hidden="true"></i>危险区域</strong>
+                <span>重置会清空手工名单与域名覆写，并恢复内置规则来源。</span>
+              </div>
+              <button class="button button-danger write-action" id="reset-rules-button" type="button" disabled>重置规则配置</button>
+            </div>
+            </div>
+          </section>
+
+          <section class="diagnostics-result" id="diagnostics-result" aria-live="polite" aria-busy="false" hidden></section>
+
+          <section class="history-view" id="history-view" aria-labelledby="history-panel-heading" data-liquid-surface>
+            <div class="history-status-rail" id="history-status-rail" data-tone="neutral">
+              <div>
+                <div class="history-status-title-line">
+                  <h3 id="history-status-title">拦截历史未启用</h3>
+                  <span class="history-state-chip" id="history-state-chip">默认关闭</span>
+                  <button class="icon-button section-toggle" type="button" aria-controls="history-body" data-collapse-label="拦截记录" aria-expanded="true" aria-label="收起拦截记录" title="收起拦截记录">
+                    <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+                  </button>
+                </div>
+                <p class="muted" id="history-status-detail">开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电。</p>
+              </div>
+              <label class="switch-label history-switch-label" for="history-enabled">
+                <input class="source-switch write-action" id="history-enabled" type="checkbox" role="switch" aria-label="记录拦截历史" aria-controls="history-details" aria-expanded="false" disabled>
+                <span class="source-toggle" aria-hidden="true">
+                  <span class="source-toggle-box"></span>
+                  <span class="source-toggle-label source-toggle-off">未记录</span>
+                  <span class="source-toggle-label source-toggle-on">记录中</span>
+                </span>
+              </label>
+            </div>
+            <div class="collapsible-body" id="history-body">
+            <div class="history-meta" id="history-meta" aria-live="polite">
+              <span id="history-capability">正在读取能力状态</span>
+              <span id="history-count-summary">0 条连接</span>
+            </div>
+            <div class="history-details" id="history-details" hidden>
+            <div class="history-filters" aria-label="拦截历史筛选">
+              <label class="history-filter-field" for="history-app-filter">
+                <span>应用</span>
+                <select id="history-app-filter" aria-label="应用筛选" disabled>
+                  <option value="-">全部应用</option>
+                </select>
+              </label>
+              <label class="history-filter-field" for="history-domain-filter">
+                <span>域名</span>
+                <input id="history-domain-filter" aria-label="域名筛选" type="search" autocomplete="off" spellcheck="false" placeholder="搜索域名" disabled>
+              </label>
+              <label class="history-filter-field" for="history-port-filter">
+                <span>端口</span>
+                <select id="history-port-filter" aria-label="端口筛选" disabled>
+                  <option value="-">全部端口</option>
+                  <option value="80">TCP 80</option>
+                  <option value="443">TCP 443</option>
+                  <option value="8080">TCP 8080</option>
+                </select>
+              </label>
+              <label class="history-filter-field" for="history-time-filter">
+                <span>时间</span>
+                <select id="history-time-filter" aria-label="时间范围" disabled>
+                  <option value="0">全部记录</option>
+                  <option value="3600">最近 1 小时</option>
+                  <option value="86400">最近 24 小时</option>
+                  <option value="604800">最近 7 天</option>
+                </select>
+              </label>
+              <button class="button button-secondary history-clear-button write-action" id="clear-history-button" type="button" disabled>
+                <i data-lucide="trash-2" aria-hidden="true"></i>
+                <span>清空历史</span>
+              </button>
+            </div>
+            <div class="history-list" id="history-list" aria-live="polite">
+              <p class="empty-state">打开此页面后读取拦截历史</p>
+            </div>
+            <button class="button button-secondary load-more" id="load-more-history" type="button" hidden>加载更多拦截记录</button>
+            </div>
+            </div>
+          </section>
+
+          <section class="rule-log-view" id="rule-log-view" aria-labelledby="rule-log-heading" aria-busy="false" data-liquid-surface>
+            <div class="rule-log-heading">
+              <div>
+                <h3 id="rule-log-heading">规则日志</h3>
+                <p class="muted">仅在你手动载入时读取规则引擎文本记录，不会后台轮询。</p>
+              </div>
+              <button class="button button-secondary" id="reload-logs-button" type="button">
+                <i data-lucide="scroll-text" aria-hidden="true"></i>
+                <span>载入规则日志</span>
+              </button>
+              <button class="icon-button section-toggle" type="button" aria-controls="rule-log-body" data-collapse-label="规则日志" aria-expanded="true" aria-label="收起规则日志" title="收起规则日志">
+                <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+              </button>
+            </div>
+            <div class="collapsible-body" id="rule-log-body">
+              <pre class="log-output" id="log-output" tabindex="0">尚未载入规则日志</pre>
+              <button class="button button-secondary load-more" id="load-more-logs" type="button" hidden>加载更多规则日志</button>
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+          <div class="panel-heading">
+            <div>
+              <h2>设置</h2>
+              <p class="muted">外观偏好在本机即时生效；网络、规则与高级维护从这里跳转到对应工作区。</p>
+            </div>
+          </div>
+
+          <div class="settings-stack">
+            <section class="settings-card" aria-labelledby="appearance-heading" data-liquid-surface>
+              <div class="settings-card-heading">
+                <span class="settings-card-icon" aria-hidden="true"><i data-lucide="sparkles"></i></span>
+                <div>
+                  <h3 id="appearance-heading">外观</h3>
+                  <p class="muted">界面材质与明暗模式相互独立，可以自由组合；明暗默认跟随系统。</p>
+                </div>
+                <button class="icon-button section-toggle" type="button" aria-controls="appearance-body" data-collapse-label="外观" aria-expanded="true" aria-label="收起外观" title="收起外观">
+                  <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+                </button>
+              </div>
+              <div class="collapsible-body settings-body" id="appearance-body">
+
+              <fieldset class="theme-choice surface-choice" id="surface-mode">
+                <legend class="visually-hidden">选择界面材质</legend>
+                <label>
+                  <input type="radio" name="surface-mode" value="classic" checked>
+                  <span>
+                    <i data-lucide="layers" aria-hidden="true"></i>
+                    <strong>经典主题</strong>
+                    <small>实心面板 · 清晰对比</small>
+                  </span>
+                </label>
+                <label>
+                  <input type="radio" name="surface-mode" value="liquid">
+                  <span>
+                    <i data-lucide="droplet" aria-hidden="true"></i>
+                    <strong>液态主题</strong>
+                    <small>玻璃层 · 柔光光斑</small>
+                  </span>
+                </label>
+              </fieldset>
+
+              <div class="settings-row">
+                <div class="settings-row-copy">
+                  <strong>明暗模式</strong>
+                  <span>亮色、暗色或跟随系统，两种材质都适配。</span>
+                </div>
+                <fieldset class="segmented-control scheme-choice" id="scheme-mode">
+                  <legend class="visually-hidden">选择明暗模式</legend>
+                  <label>
+                    <input type="radio" name="scheme-mode" value="light">
+                    <span>亮色</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="scheme-mode" value="dark">
+                    <span>暗色</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="scheme-mode" value="system" checked>
+                    <span>跟随系统</span>
+                  </label>
+                </fieldset>
+              </div>
+
+              <div class="settings-row" id="glass-strength-row">
+                <div class="settings-row-copy">
+                  <strong>液态玻璃强度</strong>
+                  <span id="glass-strength-hint">切换到液态主题后生效。</span>
+                </div>
+                <fieldset class="segmented-control glass-strength" id="glass-strength">
+                  <legend class="visually-hidden">液态玻璃强度</legend>
+                  <label>
+                    <input type="radio" name="glass-strength" value="soft" checked>
+                    <span>轻透</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="glass-strength" value="standard">
+                    <span>标准</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="glass-strength" value="strong">
+                    <span>浓郁</span>
+                  </label>
+                </fieldset>
+              </div>
+
+              <div class="settings-row">
+                <div class="settings-row-copy">
+                  <strong>自定义背景</strong>
+                  <span>此功能正在开发中，开启入口暂未开放。</span>
+                </div>
+                <label class="switch-label" title="自定义背景">
+                  <span class="visually-hidden">自定义背景</span>
+                  <input class="source-switch" id="background-enabled" type="checkbox" role="switch" aria-label="自定义背景" aria-controls="background-fields" aria-expanded="false">
+                  <span class="source-toggle" aria-hidden="true">
+                    <span class="source-toggle-box"></span>
+                    <span class="source-toggle-label source-toggle-on">已开启</span>
+                    <span class="source-toggle-label source-toggle-off">已关闭</span>
+                  </span>
+                </label>
+              </div>
+
+              <div class="background-fields" id="background-fields" hidden>
+                <div class="background-preview" id="background-preview" data-state="empty">
+                  <span id="background-preview-hint">尚未选择背景图片</span>
+                </div>
+                <div class="background-actions">
+                  <button class="button button-secondary" id="background-pick" type="button">
+                    <i data-lucide="image-up" aria-hidden="true"></i>
+                    <span>选择图片</span>
+                  </button>
+                  <button class="button button-secondary" id="background-remove" type="button" hidden>
+                    <i data-lucide="trash-2" aria-hidden="true"></i>
+                    <span>移除图片</span>
+                  </button>
+                </div>
+                <p class="settings-note" id="background-note" aria-live="polite">从设备存储里挑一张图片，压缩后保存在模块目录，仅用于本机显示。</p>
+              </div>
+
+              <div class="settings-row">
+                <div class="settings-row-copy">
+                  <strong>界面动画</strong>
+                  <span>关闭后只保留必要的状态反馈，系统的减少动效设置始终优先。</span>
+                </div>
+                <label class="switch-label" title="界面动画">
+                  <span class="visually-hidden">界面动画</span>
+                  <input class="source-switch" id="motion-enabled" type="checkbox" role="switch" aria-label="界面动画" checked>
+                  <span class="source-toggle" aria-hidden="true">
+                    <span class="source-toggle-box"></span>
+                    <span class="source-toggle-label source-toggle-on">已开启</span>
+                    <span class="source-toggle-label source-toggle-off">已关闭</span>
+                  </span>
+                </label>
+              </div>
+              <p class="settings-note" id="appearance-note" aria-live="polite"></p>
+              </div>
+            </section>
+
+            <section class="settings-card" aria-labelledby="settings-jump-heading" data-liquid-surface>
+              <div class="settings-card-heading">
+                <span class="settings-card-icon" aria-hidden="true"><i data-lucide="sliders-horizontal"></i></span>
+                <div>
+                  <h3 id="settings-jump-heading">网络 · 规则 · 高级</h3>
+                  <p class="muted">这些开关仍留在各自的工作区，避免同一状态出现两份入口。</p>
+                </div>
+                <button class="icon-button section-toggle" type="button" aria-controls="settings-jump-body" data-collapse-label="快捷入口" aria-expanded="true" aria-label="收起快捷入口" title="收起快捷入口">
+                  <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+                </button>
+              </div>
+              <div class="collapsible-body settings-body" id="settings-jump-body">
+              <div class="settings-jump-list">
+                <button class="settings-jump" type="button" data-goto-tab="tab-apps" data-goto-target="doh-section">
+                  <span class="settings-jump-icon" aria-hidden="true"><i data-lucide="unplug"></i></span>
+                  <span class="settings-jump-copy">
+                    <strong>加密 DNS</strong>
+                    <small>DoH URL、全设备或所选应用</small>
+                  </span>
+                  <i class="settings-jump-arrow" data-lucide="chevron-right" aria-hidden="true"></i>
+                </button>
+                <button class="settings-jump" type="button" data-goto-tab="tab-apps" data-goto-target="app-policy-card">
+                  <span class="settings-jump-icon" aria-hidden="true"><i data-lucide="apps"></i></span>
+                  <span class="settings-jump-copy">
+                    <strong>应用联网策略</strong>
+                    <small>UID 名单与允许地址快照</small>
+                  </span>
+                  <i class="settings-jump-arrow" data-lucide="chevron-right" aria-hidden="true"></i>
+                </button>
+                <button class="settings-jump" type="button" data-goto-tab="tab-overview" data-goto-target="auto-refresh-heading">
+                  <span class="settings-jump-icon" aria-hidden="true"><i data-lucide="calendar-sync"></i></span>
+                  <span class="settings-jump-copy">
+                    <strong>自动更新</strong>
+                    <small>开关与 6 / 12 / 24 小时周期</small>
+                  </span>
+                  <i class="settings-jump-arrow" data-lucide="chevron-right" aria-hidden="true"></i>
+                </button>
+                <button class="settings-jump" type="button" data-goto-tab="tab-sources" data-goto-target="source-workspace">
+                  <span class="settings-jump-icon" aria-hidden="true"><i data-lucide="list-filter"></i></span>
+                  <span class="settings-jump-copy">
+                    <strong>规则来源与名单</strong>
+                    <small>内置、自定义、白名单与覆写</small>
+                  </span>
+                  <i class="settings-jump-arrow" data-lucide="chevron-right" aria-hidden="true"></i>
+                </button>
+                <button class="settings-jump" type="button" data-goto-tab="tab-logs" data-goto-target="maintenance-strip">
+                  <span class="settings-jump-icon" aria-hidden="true"><i data-lucide="gauge"></i></span>
+                  <span class="settings-jump-copy">
+                    <strong>日志档位与环境检查</strong>
+                    <small>手动诊断，不做后台轮询</small>
+                  </span>
+                  <i class="settings-jump-arrow" data-lucide="chevron-right" aria-hidden="true"></i>
+                </button>
+                <button class="settings-jump settings-jump-danger" type="button" data-goto-tab="tab-logs" data-goto-target="danger-zone">
+                  <span class="settings-jump-icon" aria-hidden="true"><i data-lucide="triangle-alert"></i></span>
+                  <span class="settings-jump-copy">
+                    <strong>重置规则配置</strong>
+                    <small>位于日志页的危险区域</small>
+                  </span>
+                  <i class="settings-jump-arrow" data-lucide="chevron-right" aria-hidden="true"></i>
+                </button>
+              </div>
+              </div>
+            </section>
+
+            <section class="settings-card" aria-labelledby="about-heading" data-liquid-surface>
+              <div class="settings-card-heading">
+                <span class="settings-card-icon" aria-hidden="true"><i data-lucide="circle-info"></i></span>
+                <div>
+                  <h3 id="about-heading">关于</h3>
+                  <p class="muted">为保障网络环境安全，本工具仅支持过滤非法骚扰、恶意代码等违规信息。</p>
+                </div>
+                <button class="icon-button section-toggle" type="button" aria-controls="about-body" data-collapse-label="关于" aria-expanded="true" aria-label="收起关于" title="收起关于">
+                  <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+                </button>
+              </div>
+              <div class="collapsible-body settings-body" id="about-body">
+              <dl class="about-list">
+                <div>
+                  <dt>模块</dt>
+                  <dd>净界 · HOSTS 规则引擎</dd>
+                </div>
+                <div>
+                  <dt>版本</dt>
+                  <dd>V1.0</dd>
+                </div>
+                <div>
+                  <dt>作者</dt>
+                  <dd>相貌平平韩老魔</dd>
+                </div>
+                <div>
+                  <dt>兼容</dt>
+                  <dd>KernelSU · KernelSU Next · APatch</dd>
+                </div>
+              </dl>
+              <div class="about-actions">
+                <button class="button button-secondary" id="about-credits-button" type="button">
+                  <i data-lucide="heart-handshake" aria-hidden="true"></i>
+                  <span>查看致谢名单</span>
+                </button>
+              </div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+
+      <div class="control-bar">
+        <nav class="tab-bar" role="tablist" aria-label="净界五区导航">
+          <button class="tab-button is-active" id="tab-overview" type="button" role="tab" aria-selected="true" aria-controls="panel-overview">
+            <i data-lucide="house" aria-hidden="true"></i>
+            <span>首页<small class="tab-alias">概览</small></span>
+          </button>
+          <button class="tab-button" id="tab-sources" type="button" role="tab" aria-selected="false" aria-controls="panel-sources" tabindex="-1">
+            <i data-lucide="list-filter" aria-hidden="true"></i>
+            <span>规则<small class="tab-alias">规则来源</small></span>
+          </button>
+          <button class="tab-button" id="tab-apps" type="button" role="tab" aria-selected="false" aria-controls="panel-apps" tabindex="-1">
+            <i data-lucide="apps" aria-hidden="true"></i>
+            <span>应用</span>
+          </button>
+          <button class="tab-button" id="tab-logs" type="button" role="tab" aria-selected="false" aria-controls="panel-logs" tabindex="-1">
+            <i data-lucide="scroll-text" aria-hidden="true"></i>
+            <span>日志<small class="tab-alias">运行日志</small></span>
+          </button>
+          <button class="tab-button" id="tab-settings" type="button" role="tab" aria-selected="false" aria-controls="panel-settings" tabindex="-1">
+            <i data-lucide="settings" aria-hidden="true"></i>
+            <span>设置<small class="tab-alias">偏好</small></span>
+          </button>
+        </nav>
+      </div>
+    </div>
+
+    <dialog id="source-dialog" aria-labelledby="source-dialog-title">
+      <form method="dialog" id="source-form">
+        <div class="dialog-heading">
+          <h2 id="source-dialog-title">添加自定义规则</h2>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭" title="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <input id="source-id" type="hidden">
+        <label class="field-label" for="source-name">名称</label>
+        <input id="source-name" name="name" type="text" autocomplete="off" maxlength="320" required aria-describedby="source-name-error">
+        <p class="field-error" id="source-name-error"></p>
+        <label class="field-label" for="source-url">规则链接</label>
+        <input id="source-url" name="url" type="url" inputmode="url" autocomplete="off" maxlength="2048" required aria-describedby="source-url-error" placeholder="https://example.com/rules.hosts">
+        <p class="field-error" id="source-url-error"></p>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close-dialog>取消</button>
+          <button class="button button-primary write-action" id="save-source-button" type="submit">保存并应用</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="delete-dialog" aria-labelledby="delete-dialog-title">
+      <form method="dialog" id="delete-form">
+        <div class="dialog-heading">
+          <h2 id="delete-dialog-title">删除规则来源</h2>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭" title="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p>删除后会同时清理该来源的缓存，并立即应用新的配置。</p>
+        <p class="dialog-emphasis" id="delete-source-name"></p>
+        <input id="delete-source-id" type="hidden">
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close-dialog>取消</button>
+          <button class="button button-danger write-action" id="confirm-delete-button" type="submit">确认删除</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rollback-dialog" aria-labelledby="rollback-dialog-title">
+      <form method="dialog" id="rollback-form">
+        <div class="dialog-heading">
+          <h2 id="rollback-dialog-title">回滚规则版本</h2>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭" title="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p id="rollback-dialog-copy">将切换到上一份已验证的规则版本。</p>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close-dialog>取消</button>
+          <button class="button button-danger write-action" id="confirm-rollback-button" type="submit">确认回滚</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="pause-dialog" aria-labelledby="pause-dialog-title">
+      <form method="dialog" id="pause-form">
+        <div class="dialog-heading">
+          <h2 id="pause-dialog-title">暂停保护</h2>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭" title="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p>暂停后将停止 hosts 规则过滤，直到你主动恢复保护。当前规则版本和模式会保留，恢复时不会重新下载规则。</p>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close-dialog>取消</button>
+          <button class="button button-danger write-action" id="confirm-pause-button" type="submit">确认</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="clear-history-dialog" aria-labelledby="clear-history-dialog-title">
+      <form method="dialog" id="clear-history-form">
+        <div class="dialog-heading">
+          <h2 id="clear-history-dialog-title">清空拦截历史</h2>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭" title="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p>只会删除已保存的拦截事件，不会改变规则来源、挂载状态或白名单配置。</p>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close-dialog>取消</button>
+          <button class="button button-danger write-action" id="confirm-clear-history-button" type="submit">确认清空</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="doh-confirm-dialog" aria-labelledby="doh-confirm-title">
+      <form method="dialog" id="doh-confirm-form">
+        <div class="dialog-heading">
+          <h2 id="doh-confirm-title">启用加密 DNS</h2>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭" title="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p>启用后会启动后台代理并安装模块专属 DNS 规则，处于启用状态时会增加少量额外耗电。</p>
+        <p>请先关闭 Android Private DNS；VPN/TUN 路由可能绕过这些规则，应用自带 DoH 也可能自行绕过系统 DNS。</p>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close-dialog>取消</button>
+          <button class="button button-primary write-action" id="doh-confirm-enable" type="submit">确认启用</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="reset-rules-dialog" aria-labelledby="reset-rules-dialog-title">
+      <form method="dialog" id="reset-rules-form">
+        <div class="dialog-heading">
+          <h2 id="reset-rules-dialog-title">重置规则配置</h2>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭" title="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p>将清空手工名单和域名覆写，恢复秋风规则与10007规则，关闭增强白名单并切换为全部拦截。应用策略与永久提示偏好不受影响。</p>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close-dialog>取消</button>
+          <button class="button button-danger write-action" type="submit">确认重置</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="background-picker-dialog" aria-labelledby="background-picker-title">
+      <form method="dialog" id="background-picker-form">
+        <div class="dialog-heading">
+          <h2 id="background-picker-title">选择背景图片</h2>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭" title="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p class="muted" id="background-picker-hint">从设备存储中选择 JPG、PNG 或 WebP 图片。</p>
+        <div class="picker-path">
+          <button class="icon-button" id="background-picker-up" type="button" aria-label="上一级目录" title="上一级目录" disabled>
+            <i data-lucide="arrow-up" aria-hidden="true"></i>
+          </button>
+          <span id="background-picker-path">/sdcard</span>
+        </div>
+        <div class="picker-list" id="background-picker-list" aria-live="polite" aria-busy="false"></div>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close-dialog>取消</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="credits-dialog" aria-labelledby="credits-dialog-title">
+      <form method="dialog">
+        <div class="dialog-heading">
+          <h2 id="credits-dialog-title">致谢</h2>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭" title="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p>感谢参与规则生态与基础设施建设的开发者。</p>
+        <ul class="credits-list">
+          <li><a href="https://www.coolapk.com/u/4820503" target="_blank" rel="noreferrer">@coolapk 10007</a></li>
+          <li><a href="https://github.com/AdguardTeam/AdGuardHome" target="_blank" rel="noreferrer">AdGuardHome</a></li>
+        </ul>
+        <div class="dialog-actions">
+          <button class="button button-primary" type="button" data-close-dialog>关闭</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="notice-dialog" aria-labelledby="notice-dialog-title" aria-describedby="notice-dialog-copy">
+      <form method="dialog" id="notice-form">
+        <div class="dialog-heading">
+          <h2 id="notice-dialog-title">使用前请确认</h2>
+        </div>
+        <p id="notice-dialog-copy">为保障网络环境安全，本工具仅支持过滤非法骚扰、恶意代码等违规信息。请正确合理使用工具功能，勿将合法商业广告纳入屏蔽范围。</p>
+        <div class="dialog-actions notice-actions">
+          <button class="button button-secondary" id="notice-cancel-button" type="button">取消</button>
+          <button class="button button-primary" id="notice-confirm-button" type="button">确认</button>
+          <button class="button button-primary" id="notice-confirm-permanent-button" type="button">确认且不再提醒</button>
+        </div>
+      </form>
+    </dialog>
+
+    <section class="notice-readonly" id="notice-readonly" hidden aria-live="polite">
+      <div>
+        <strong>当前为只读说明页</strong>
+        <span>重新确认使用说明后，才可执行规则、应用和维护操作。</span>
+      </div>
+      <button class="button button-secondary" id="notice-reopen-button" type="button">重新确认</button>
+    </section>
+
+    <div class="toast-region" id="announcer" aria-live="polite" aria-atomic="true"></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
