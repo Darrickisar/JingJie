@@ -2451,9 +2451,22 @@ function rememberTabScroll(tabId, offset) {
   tabScrollOffsets.set(tabId, offset);
 }
 
-// scrollTo 会为了夹取滚动范围强制同步布局。绝大多数切换的两页都停在顶部，
-// 位置没变就别调它，省下切页时一次白跑的样式重算与布局。
-function restoreTabScroll(tabId, currentOffset) {
+// scrollTo 必须先夹取滚动范围，所以会把此刻所有待结算的布局强制算完。放在面板
+// 增删之后调用，等于每次切换都在点击回调里同步重排整篇文档——面板越高越贵。
+//
+// 拆成两段来躲开这笔开销：
+//   · 目标位置是顶部（切换里的绝大多数）：在任何写入之前就滚，那时布局还是干净的，
+//     scrollTo 无需结算任何东西；而且 0 永远落在合法范围内，不存在夹取问题。
+//   · 目标位置非 0（切回一个你之前滚过的页）：只能等新面板显示后再滚，否则文档
+//     高度还是旧面板的，目标位置会被夹回去。这种情况少，且宁可慢也不能滚错。
+function restoreTabScrollBeforeSwap(tabId, currentOffset) {
+  const target = tabScrollOffsets.get(tabId) ?? 0;
+  if (target !== 0) return false;
+  if (currentOffset !== 0) globalThis.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  return true;
+}
+
+function restoreTabScrollAfterSwap(tabId, currentOffset) {
   const target = tabScrollOffsets.get(tabId) ?? 0;
   if (target === currentOffset) return;
   globalThis.scrollTo({ top: target, left: 0, behavior: 'auto' });
@@ -2469,6 +2482,10 @@ function selectTab(tab) {
   // 先读滚动位置，此刻还没有任何写入，这次读取不会触发强制布局。
   const currentOffset = globalThis.scrollY || 0;
   rememberTabScroll(previousTab?.id, currentOffset);
+  // 趁布局还干净把「回到顶部」这一档滚完；剩下的少数情况留到面板换完再滚。
+  const scrolled = restoreTabScrollBeforeSwap(tab.id, currentOffset);
+  // 切换窗口要在昂贵的写入之前就打开，玻璃折射滤镜和光斑动画才不会陪着这一帧跑。
+  markPanelSwitch();
 
   // 只改真正换了状态的一进一出：整排五个页签一起写，每次切换要白挨九次属性变更。
   if (previousTab) {
@@ -2496,8 +2513,7 @@ function selectTab(tab) {
   const tabBar = tab.closest('[role="tablist"]');
   tabBar.dataset.activeIndex = String(nextIndex);
   tabBar.style.setProperty('--active-tab-offset', `${nextIndex * 100}%`);
-  restoreTabScroll(tab.id, currentOffset);
-  markPanelSwitch();
+  if (!scrolled) restoreTabScrollAfterSwap(tab.id, currentOffset);
 
   historyPanelActive = tab.id === 'tab-logs';
   appsPanelActive = tab.id === 'tab-apps';
