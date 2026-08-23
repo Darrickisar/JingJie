@@ -364,11 +364,6 @@ pointer_value() {
   "$BB" awk -F= -v wanted="$key" '$1==wanted{print $2}' "$file"
 }
 
-strict_pointer_hash() {
-  config_validate_pointer || return
-  pointer_value snapshot_sha256
-}
-
 config_current_revision() {
   config_validate_pointer || return
   local rev expected actual
@@ -676,7 +671,13 @@ config_prune_custom_cache() {
     for file in "$dir"/*; do
       [ -e "$file" ] || [ -L "$file" ] || continue
       base=${file##*/}
-      [ "$base" = "$allowed_hash.hosts" ] || rm -rf "$file" || {
+      # 归一化缓存（.norm 系列）是当前缓存的加速副本，跟着它一起留下。
+      case "$base" in
+        "$allowed_hash.hosts"|"$allowed_hash.hosts.norm"|"$allowed_hash.hosts.norm.allow"|"$allowed_hash.hosts.norm.meta")
+          continue
+          ;;
+      esac
+      rm -rf "$file" || {
         rm -f "$allowed"
         return 74
       }

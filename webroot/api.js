@@ -3,6 +3,9 @@ import { BridgeError, execBridge } from './bridge.js';
 const API_SCRIPT = "/system/bin/sh '/data/adb/modules/jingjie_hosts/webui_api.sh'";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_POLL_MS = 650;
+// 大多数操作一两秒内就结束，前几轮用更短的间隔让按钮更快恢复；
+// 之后退回固定间隔，长任务才不会被刷成高频轮询。
+const POLL_RAMP_MS = [120, 200, 320, 480];
 const SOURCE_ID = /^(?:awa|rule10007|custom_(?!0+$)[0-9]{1,57})$/;
 const OPERATION_ID = /^op_[A-Za-z0-9_-]+$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
@@ -390,6 +393,7 @@ export async function pollOperation(operationId, onStatus, signal, {
   if (!OPERATION_ID.test(operationId)) invalid('invalid operation id');
   if (typeof onStatus !== 'function') invalid('onStatus must be a function');
 
+  let attempt = 0;
   while (true) {
     if (signal?.aborted) throw abortError();
     const status = await execApi('status', [], { timeoutMs });
@@ -402,6 +406,8 @@ export async function pollOperation(operationId, onStatus, signal, {
       }
       return status;
     }
-    await delay(pollMs, signal);
+    const ramped = attempt < POLL_RAMP_MS.length ? POLL_RAMP_MS[attempt] : pollMs;
+    attempt += 1;
+    await delay(Math.min(ramped, pollMs), signal);
   }
 }

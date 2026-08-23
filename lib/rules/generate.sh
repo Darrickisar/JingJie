@@ -53,14 +53,18 @@ build_generation() {
     "$BB" awk 'NF{print "999999\t" $1 "\t0.0.0.0"}' "$manual_blocklist" >> "$records" || { rm -rf "$tmp"; return 74; }
   fi
   # 把每个启用来源的归一化规则按优先级并入候选集；来源自带的例外规则进入最终放行名单。
+  # 停用某个来源只是让它这一代不参与合并，缓存与配置都留着，重新启用后下一代就会恢复。
   local priority id kind enabled state updated count sha url_sha path allow_count skipped_count allow_path source_error extra
+  local source_row_count=0 enabled_source_count=0
   while IFS="$(printf '\t')" read -r priority id kind enabled state updated count sha url_sha path allow_count skipped_count allow_path source_error extra || \
     [ -n "${priority}${id}${kind}${enabled}${state}${updated}${count}${sha}${url_sha}${path}${allow_count}${skipped_count}${allow_path}${source_error}${extra}" ]; do
     [ -n "$id" ] || continue
     [ -z "$extra" ] || { rm -rf "$tmp"; return 65; }
     case "$priority" in ''|*[!0-9]*) rm -rf "$tmp"; return 65 ;; esac
     case "$count:$allow_count:$skipped_count" in *[!0-9:]*) rm -rf "$tmp"; return 65 ;; esac
+    source_row_count=$((source_row_count + 1))
     [ "$enabled" = 1 ] || continue
+    enabled_source_count=$((enabled_source_count + 1))
     [ "$state" = fresh ] || [ "$state" = stale ] || continue
     case "$path" in "$work/normalized/"*.tsv) ;; *) rm -rf "$tmp"; return 65 ;; esac
     [ -f "$path" ] || { rm -rf "$tmp"; return 66; }
@@ -123,18 +127,48 @@ build_generation() {
     rm -rf "$tmp"
     return 65
   fi
-  # 「全部模块事件」档位下把这一代的放行/拦截明细写进规则日志，
-  # 用户才能核对白名单、来源例外和奖励广告例外到底放行了什么。
+  # 拦截历史只能看到被 REJECT 的连接，放行的连接在架构上抓不到，所以放行明细只能写进规则日志。
+  # 「全部模块事件」档位下把这一代的放行/拦截明细落盘，用户才能核对白名单、来源例外和奖励广告
+  # 例外到底放行了什么；其余档位保持安静。
   if command -v log_verbose_event >/dev/null 2>&1; then
     local allow_total manual_allow_count remote_allow_count reward_exception_count
+    local allow_effective effective_count effective_sample manual_block_count
     allow_total=$("$BB" awk 'NF{count++} END{print count+0}' "$whitelist_domains" 2>/dev/null) || allow_total=0
     manual_allow_count=$("$BB" awk 'NF{count++} END{print count+0}' "$tmp/whitelist-records.tsv" 2>/dev/null) || manual_allow_count=0
     remote_allow_count=$("$BB" awk 'NF{count++} END{print count+0}' "$remote_allow_domains" 2>/dev/null) || remote_allow_count=0
     reward_exception_count=$("$BB" awk 'NF{count++} END{print count+0}' "$reward_domains" 2>/dev/null) || reward_exception_count=0
     log_verbose_event info generation_allowed \
       "放行 $allow_total 个域名：白名单 $manual_allow_count、来源例外 $remote_allow_count；奖励广告例外 $reward_exception_count" || true
+    # 真正值得看的明细是「本来会被拦、因为放行名单留下来」的域名；名单里从没被任何来源拦过的域名不写。
+    allow_effective="$tmp/allow-effective.txt"
+    "$BB" awk -F '\t' 'FILENAME==ARGV[1]{allow[$1]=1; next} ($1 in allow) && !seen[$1]++{print $1}' \
+      "$whitelist_domains" "$all_rows" > "$allow_effective" 2>/dev/null || : > "$allow_effective"
+    effective_count=$("$BB" awk 'NF{count++} END{print count+0}' "$allow_effective" 2>/dev/null) || effective_count=0
+    if [ "$effective_count" -gt 0 ]; then
+      # 规则日志有体积上限，域名只列前 20 个，其余用省略号收尾。
+      effective_sample=$("$BB" awk 'NR<=20{printf "%s%s", (NR>1 ? "、" : ""), $1} END{if (NR>20) printf "…"}' \
+        "$allow_effective" 2>/dev/null) || effective_sample=''
+      log_verbose_event info generation_allow_detail \
+        "放行明细：$effective_count 个域名本来会被拦截，因命中放行名单而保留：$effective_sample" || true
+    else
+      log_verbose_event info generation_allow_detail '放行明细：本次没有域名因放行名单而保留' || true
+    fi
     log_verbose_event info generation_blocked \
       "拦截 $all_count 个域名（保留奖励广告模式 $reward_count 个）" || true
+    # 全部来源停用不等于暂停保护：来源规则整体失效，手工黑名单和内置基线照样拦截。
+    if [ "$enabled_source_count" -eq 0 ]; then
+      manual_block_count=0
+      if [ -f "$manual_blocklist" ]; then
+        manual_block_count=$("$BB" awk 'NF{count++} END{print count+0}' "$manual_blocklist" 2>/dev/null) || manual_block_count=0
+      fi
+      if [ "$source_row_count" -gt 0 ]; then
+        log_verbose_event warn generation_sources_disabled \
+          "全部规则来源已停用：来源规则不生效，仍在拦截的是内置基线与手工黑名单 $manual_block_count 条" || true
+      else
+        log_verbose_event warn generation_sources_disabled \
+          "没有任何规则来源：仍在拦截的是内置基线与手工黑名单 $manual_block_count 条" || true
+      fi
+    fi
   fi
 
   generation_rows_to_hosts "$all_filtered" "$tmp/all"

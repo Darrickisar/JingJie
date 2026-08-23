@@ -1,6 +1,5 @@
 const CALLBACK_PREFIX = '__jingjie_cb_';
 const DEFAULT_TIMEOUT_MS = 10_000;
-const FIXED_MODULE_DIR = '/data/adb/modules/jingjie_hosts';
 
 let callbackSequence = 0;
 
@@ -26,28 +25,6 @@ function getHostAndBridge() {
   if (!host) return { host: null, ksu: null };
   const ksu = globalThis.window.ksu;
   return { host, ksu };
-}
-
-export function readModuleInfoDiagnostic() {
-  const { ksu } = getHostAndBridge();
-  if (!ksu || typeof ksu.moduleInfo !== 'function') {
-    return { available: false, moduleDir: null };
-  }
-
-  try {
-    const raw = ksu.moduleInfo();
-    const info = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    if (!info || typeof info !== 'object' || typeof info.moduleDir !== 'string') {
-      return { available: true, moduleDir: null };
-    }
-    const normalized = info.moduleDir.replace(/\/+$/, '');
-    return {
-      available: true,
-      moduleDir: normalized === FIXED_MODULE_DIR ? FIXED_MODULE_DIR : null,
-    };
-  } catch {
-    return { available: false, moduleDir: null };
-  }
 }
 
 export function execBridge(command, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {

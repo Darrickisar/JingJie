@@ -96,6 +96,12 @@ const LIST_READ_MAX_ATTEMPTS = 3;
 const PANEL_SETTLE_MS = 140;
 const LIST_VALIDATE_DEBOUNCE_MS = 180;
 const PANEL_PREWARM_MS = 220;
+// 预热要强制整棵子树同步布局，撞在用户点页签那一帧上就是一次能看见的卡顿；
+// 主线程明显没闲下来时先让路，隔这么久再试。
+const PANEL_PREWARM_DEFER_MS = 260;
+const PANEL_PREWARM_MAX_DEFERRALS = 24;
+// 入场动画跑完之前，底栏的折射层每帧都要重算背景，这段窗口里把它摘掉。
+const PANEL_SWITCH_SETTLE_MS = 260;
 const HISTORY_RENDER_CHUNK = 25;
 const SURFACE_MODES = ['classic', 'liquid'];
 const SCHEME_MODES = ['light', 'dark', 'system'];
@@ -268,6 +274,9 @@ const warmedPanels = new Set();
 // 预热优先级：元素数从多到少，重的面板先热。
 const PANEL_PREWARM_ORDER = ['panel-settings', 'panel-sources', 'panel-logs', 'panel-overview', 'panel-apps'];
 let prewarmIdleHandle = null;
+let prewarmDeferrals = 0;
+let lastTabSwitchAt = 0;
+let switchStateTimer = null;
 let initialized = false;
 let disposed = false;
 let currentStatus = null;
@@ -292,6 +301,7 @@ let historyPanelActive = false;
 let historyQuerySerial = 0;
 let historyDomainTimer = null;
 let historyDomainApplied = '';
+let historyDomainComposing = false;
 let historyRenderToken = 0;
 let historyReloadQueued = false;
 let historyAllowCacheText = null;
@@ -378,6 +388,29 @@ function debounce(key, callback, delay) {
     debounceTimers.delete(key);
     callback();
   }, delay));
+}
+
+function monotonicNow() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function elapsedSince(stamp) {
+  return stamp === 0 ? Number.POSITIVE_INFINITY : monotonicNow() - stamp;
+}
+
+// 入场动画期间给 :root 挂个开关，好让样式表把那几帧真正贵的活儿摘掉。
+function markPanelSwitch() {
+  lastTabSwitchAt = monotonicNow();
+  const root = document.documentElement;
+  root.dataset.switching = 'true';
+  if (switchStateTimer !== null) {
+    globalThis.clearTimeout(switchStateTimer);
+    timers.delete(switchStateTimer);
+  }
+  switchStateTimer = schedule(() => {
+    switchStateTimer = null;
+    delete root.dataset.switching;
+  }, PANEL_SWITCH_SETTLE_MS);
 }
 
 function afterFirstPaint(callback) {
@@ -709,7 +742,7 @@ function sourceCard(source, sourceIndex, sourceCount) {
   const disabled = !initialized || !managementUnlocked || Boolean(currentStatus?.busy);
   const meta = source.enabled
     ? `${formatCount(source.ruleCount)} 条 · ${formatTime(source.updatedAt)}`
-    : '已停用，缓存保留';
+    : '已停用：规则不参与合并，缓存保留';
   const url = source.url
     ? `<span class="source-url" title="${escapeAttribute(source.url)}">${escapeText(source.url)}</span>`
     : '';
@@ -1067,6 +1100,7 @@ function renderStatus(status) {
     total + (Number.isFinite(source.ruleCount) ? source.ruleCount : 0)
   ), 0);
   const noOnlineRules = sources.length > 0 && onlineRuleTotal === 0;
+  const allSourcesDisabled = sources.length > 0 && enabledSources.length === 0;
   const retainedPreviousGeneration = Boolean(status.activeGeneration)
     && (status.sourcesOutOfSync || status.result === 'failed' || status.result === 'critical');
   const impactCopy = elements.ruleCount.closest('#rule-impact-copy');
@@ -1082,6 +1116,8 @@ function renderStatus(status) {
     const localCopy = `本地规则 ${formatCount(status.ruleCount)} 条`;
     if (paused) {
       elements.ruleImpactHint.textContent = '恢复保护后重新挂载当前规则版本';
+    } else if (allSourcesDisabled) {
+      elements.ruleImpactHint.textContent = `${localCopy} · 已停用全部来源：来源规则不生效，手工黑名单仍然拦截`;
     } else if (noOnlineRules) {
       elements.ruleImpactHint.textContent = `${localCopy} · 在线来源未加载，只剩内置名单与手工规则生效`;
     } else if (onlineRuleTotal > 0) {
@@ -2364,11 +2400,26 @@ function prewarmPanel(panel, width) {
   panel.style.width = '';
 }
 
+// 忙的时候把这一轮整个推后，而不是硬着头皮预热。推后不记账，也不占名额。
+function deferPanelPrewarm() {
+  if (disposed) return;
+  prewarmDeferrals += 1;
+  if (prewarmDeferrals > PANEL_PREWARM_MAX_DEFERRALS) return;
+  schedule(schedulePanelPrewarm, PANEL_PREWARM_DEFER_MS);
+}
+
 function schedulePanelPrewarm() {
   if (disposed || prewarmIdleHandle !== null) return;
-  const run = () => {
+  const run = (deadline) => {
     prewarmIdleHandle = null;
     if (disposed) return;
+    // requestIdleCallback 带 timeout 时会在超时那一刻硬插进来，哪怕主线程正忙。
+    // 预热那一次强制布局要是落在用户点页签的同一帧里，就是他抱怨的切页卡顿，
+    // 所以超时唤醒和刚切过页签这两种情况都先让路。
+    if (deadline?.didTimeout === true || elapsedSince(lastTabSwitchAt) < PANEL_SWITCH_SETTLE_MS) {
+      deferPanelPrewarm();
+      return;
+    }
     const pending = [...document.querySelectorAll('.tab-panel[hidden]')]
       .filter((item) => !warmedPanels.has(item.id));
     // 按体量从重到轻预热：整轮要一两秒才走完，这段窗口里用户随时可能点标签，
@@ -2376,9 +2427,16 @@ function schedulePanelPrewarm() {
     const panel = PANEL_PREWARM_ORDER.map((id) => pending.find((item) => item.id === id))
       .find(Boolean) ?? pending[0];
     if (!panel) return;
-    warmedPanels.add(panel.id);
     const width = document.querySelector('.tab-panel:not([hidden])')?.getBoundingClientRect().width ?? 0;
-    if (width > 0) prewarmPanel(panel, width);
+    // 量不到宽度就别记账。记了又没真预热，面板会一直停在 display:none，
+    // 首次切过去那笔整棵子树的布局最后还是原样压在用户那一帧上。
+    if (width <= 0) {
+      deferPanelPrewarm();
+      return;
+    }
+    warmedPanels.add(panel.id);
+    prewarmDeferrals = 0;
+    prewarmPanel(panel, width);
     schedulePanelPrewarm();
   };
   // 优先用空闲帧，避免和开机首屏渲染抢主线程；不支持时退回定时器错峰。
@@ -2439,6 +2497,7 @@ function selectTab(tab) {
   tabBar.dataset.activeIndex = String(nextIndex);
   tabBar.style.setProperty('--active-tab-offset', `${nextIndex * 100}%`);
   restoreTabScroll(tab.id, currentOffset);
+  markPanelSwitch();
 
   historyPanelActive = tab.id === 'tab-logs';
   appsPanelActive = tab.id === 'tab-apps';
@@ -2678,8 +2737,8 @@ function renderHistoryStatus(status = {}) {
     : status.availability === 'unsupported'
     ? '当前设备未提供 NFLOG 能力，普通 hosts 规则仍然正常工作。'
     : status.logging
-      ? '仅记录被拒绝的 TCP 连接起始请求，关闭后不会继续产生新的历史。'
-      : '开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电。';
+      ? '仅记录被拒绝的 TCP 连接起始请求；放行的连接抓不到，放行明细在下方「规则日志」。关闭后不再产生新的历史。'
+      : '开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电；放行的连接抓不到，放行明细在下方「规则日志」。';
   elements.historyCapability.textContent = status.availability === 'unsupported'
     ? '能力状态：不可用'
     : status.availability === 'available' ? '能力状态：可用' : '能力状态：待检测';
@@ -2751,6 +2810,10 @@ function historyItemMarkup(item, allowSet) {
     ? item.decision
     : historyDecisionForDomain(domain, allowSet);
   const decisionLabel = decision === 'allow' ? '已放行' : decision === 'block' ? '已拦截' : '未设置';
+  // 徽标说的是这个域名当前的名单状态，不是这一条记录的结果：历史里只可能有被拦下来的连接。
+  const decisionHint = decision === 'allow'
+    ? '已在白名单：后续连接放行，不会再写进拦截历史'
+    : decision === 'block' ? '不在白名单：按当前规则继续拦截' : '尚未加入任何名单';
   const warning = Number(item.dropped || item.degraded) > 0
     ? `<span class="history-event-warning">${item.dropped ? `丢弃 ${formatCount(item.dropped)}` : ''}${item.dropped && item.degraded ? ' · ' : ''}${item.degraded ? `降级 ${formatCount(item.degraded)}` : ''}</span>`
     : '';
@@ -2763,7 +2826,7 @@ function historyItemMarkup(item, allowSet) {
       <div class="history-row-meta">
         <time datetime="${escapeAttribute(new Date(Number(item.epoch) * 1000).toISOString())}">${escapeText(formatTime(Number(item.epoch)))}</time>
         <b>${formatCount(item.count)} 次</b>
-        <span class="history-decision history-decision-${decision}">${decisionLabel}</span>
+        <span class="history-decision history-decision-${decision}" title="${escapeAttribute(decisionHint)}">${decisionLabel}</span>
         ${warning}
       </div>
       <div class="history-row-actions" role="group" aria-label="${escapeAttribute(domain)} 名单操作">
@@ -2890,7 +2953,15 @@ async function loadHistory({ reset = false, refreshMetadata = reset } = {}) {
   if (reset) {
     historyCursor = '0';
     historyHasMore = false;
-    elements.historyList.innerHTML = '<p class="empty-state">正在读取拦截历史…</p>';
+    // 列表里已经有行时不要先拆空再重建。搜索域名是一边打字一边触发的，
+    // 每次都「拆掉上百行 → 插入占位 → 拆掉占位 → 再插回上百行」，
+    // 四趟 DOM 里有两趟纯属白跑，主线程被占住就成了输入法卡顿。
+    // 保留旧行只标忙碌，等新数据到了由 renderHistoryItems 一次换掉。
+    if (elements.historyList.querySelector('.history-row')) {
+      elements.historyList.setAttribute('aria-busy', 'true');
+    } else {
+      elements.historyList.innerHTML = '<p class="empty-state">正在读取拦截历史…</p>';
+    }
   }
   syncHistoryControls();
   try {
@@ -2941,6 +3012,7 @@ async function loadHistory({ reset = false, refreshMetadata = reset } = {}) {
     }
   } finally {
     historyLoading = false;
+    elements.historyList.removeAttribute('aria-busy');
     syncHistoryControls();
     const reloadQueued = historyReloadQueued;
     historyReloadQueued = false;
@@ -3148,15 +3220,40 @@ function setupInteractions() {
   elements.historyAppFilter.addEventListener('change', resetHistoryQuery);
   elements.historyPortFilter.addEventListener('change', resetHistoryQuery);
   elements.historyTimeFilter.addEventListener('change', resetHistoryQuery);
-  elements.historyDomainFilter.addEventListener('input', () => {
-    if (historyDomainTimer !== null) globalThis.clearTimeout(historyDomainTimer);
-    historyDomainTimer = globalThis.setTimeout(() => {
+  // 输入法组词期间每敲一下拼音都会派发 input，而此刻输入框里是还没定字的
+  // 候选串，拿去查历史必然查不到东西，白跑一趟整段列表的重建，
+  // 主线程被这笔活儿占住的表现就是输入法卡住。组词中一律不查，定字后再查一次。
+  const applyHistoryDomainQuery = () => {
+    if (historyDomainComposing) return;
+    const query = elements.historyDomainFilter.value.trim().toLowerCase();
+    if (query === historyDomainApplied) return;
+    historyDomainApplied = query;
+    resetHistoryQuery();
+  };
+  const scheduleHistoryDomainQuery = () => {
+    if (historyDomainTimer !== null) {
+      globalThis.clearTimeout(historyDomainTimer);
+      timers.delete(historyDomainTimer);
+    }
+    historyDomainTimer = schedule(() => {
       historyDomainTimer = null;
-      const query = elements.historyDomainFilter.value.trim().toLowerCase();
-      if (query === historyDomainApplied) return;
-      historyDomainApplied = query;
-      resetHistoryQuery();
+      applyHistoryDomainQuery();
     }, 280);
+  };
+  elements.historyDomainFilter.addEventListener('compositionstart', () => {
+    historyDomainComposing = true;
+  });
+  elements.historyDomainFilter.addEventListener('compositionend', () => {
+    historyDomainComposing = false;
+    scheduleHistoryDomainQuery();
+  });
+  elements.historyDomainFilter.addEventListener('input', (event) => {
+    // Safari/部分 WebView 不派发 compositionstart，但 isComposing 一直是可信的。
+    if (event.isComposing === true) {
+      historyDomainComposing = true;
+      return;
+    }
+    scheduleHistoryDomainQuery();
   });
   elements.loadMoreHistory.addEventListener('click', () => loadHistory());
   elements.reloadLogsButton.addEventListener('click', () => loadRuleLogs({ reset: true }));

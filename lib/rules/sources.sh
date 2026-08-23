@@ -7,10 +7,8 @@ SOURCE_TIMEOUT=15
 SOURCE_CURL_TIMEOUT=7
 SOURCE_ATTEMPTS=2
 SOURCE_REFRESH_TIMEOUT=480
-
-builtin_source_url() {
-  source_registry_builtin_url "$1"
-}
+# 归一化缓存的格式版本。字段含义一旦变动就加一，旧缓存会自动作废重算。
+SOURCE_NORMALIZED_CACHE_VERSION=1
 
 source_force_block_addresses() {
   local file=$1 tmp="$1.block.$$"
@@ -134,10 +132,12 @@ source_previous_cache_health() {
   ' "$diagnostics"
 }
 
+# 只有真的重新联网取回内容，才算“这一刻更新过”。
+# 用缓存装载的来源（单源刷新时的其他来源、改配置时的全部来源）必须沿用上一次的更新时间。
 source_refresh_updated_at() {
   [ "$#" -eq 3 ] || return 64
   local target_id=$1 id=$2 url_sha=$3 updated
-  if [ -n "$target_id" ] && [ "$id" != "$target_id" ]; then
+  if [ "${FETCH_USED_CACHE-0}" = 1 ] || { [ -n "$target_id" ] && [ "$id" != "$target_id" ]; }; then
     updated=$(source_previous_updated_at "$id" "$url_sha" 2>/dev/null) || updated=0
     printf '%s\n' "$updated"
   else
@@ -266,6 +266,101 @@ validate_source_download() {
       export VALIDATE_ALLOW_COUNT VALIDATE_SKIPPED_COUNT VALIDATE_ALLOW_PATH
       ;;
   esac
+}
+
+source_normalized_cache_paths() {
+  [ "$#" -eq 1 ] || return 64
+  SOURCE_NORM_CACHE="$1.norm"
+  SOURCE_NORM_CACHE_ALLOW="$1.norm.allow"
+  SOURCE_NORM_CACHE_META="$1.norm.meta"
+  export SOURCE_NORM_CACHE SOURCE_NORM_CACHE_ALLOW SOURCE_NORM_CACHE_META
+}
+
+# 归一化（awk 加排序）是重建规则里最慢的一步，而缓存内容没变时结果必然一样。
+# 这里用原始缓存的内容摘要当钥匙，把归一化结果和它的条数一起存下来复用。
+source_normalized_cache_load() {
+  [ "$#" -eq 4 ] || return 64
+  local id=$1 cache=$2 raw_sha=$3 normalized_dest=$4
+  local version stored_raw stored_norm count allow_count skipped_count extra field
+  source_normalized_cache_paths "$cache" || return 1
+  [ -f "$SOURCE_NORM_CACHE_META" ] && [ ! -L "$SOURCE_NORM_CACHE_META" ] || return 1
+  [ -f "$SOURCE_NORM_CACHE" ] && [ ! -L "$SOURCE_NORM_CACHE" ] || return 1
+  IFS="$(printf '\t')" read -r version stored_raw stored_norm count allow_count skipped_count extra \
+    < "$SOURCE_NORM_CACHE_META" || return 1
+  [ -z "$extra" ] || return 1
+  [ "$version" = "$SOURCE_NORMALIZED_CACHE_VERSION" ] || return 1
+  [ -n "$raw_sha" ] && [ "$stored_raw" = "$raw_sha" ] || return 1
+  for field in "$count" "$allow_count" "$skipped_count"; do
+    case "$field" in ''|*[!0-9]*) return 1 ;; esac
+  done
+  # 摘要要现算现比，缓存被截断或改写过就当它不存在，回去重新归一化。
+  [ "$stored_norm" = "$(sha256_file "$SOURCE_NORM_CACHE")" ] || return 1
+  mkdir -p "${normalized_dest%/*}" || return 1
+  case "$id" in
+    custom_[1-9]*)
+      [ -f "$SOURCE_NORM_CACHE_ALLOW" ] && [ ! -L "$SOURCE_NORM_CACHE_ALLOW" ] || return 1
+      cp "$SOURCE_NORM_CACHE_ALLOW" "${normalized_dest}.allow" || return 1
+      VALIDATE_ALLOW_PATH="${normalized_dest}.allow"
+      ;;
+    *) VALIDATE_ALLOW_PATH=- ;;
+  esac
+  cp "$SOURCE_NORM_CACHE" "$normalized_dest" || return 1
+  VALIDATE_RULE_COUNT=$count
+  VALIDATE_ALLOW_COUNT=$allow_count
+  VALIDATE_SKIPPED_COUNT=$skipped_count
+  export VALIDATE_RULE_COUNT VALIDATE_ALLOW_COUNT VALIDATE_SKIPPED_COUNT VALIDATE_ALLOW_PATH
+}
+
+# 写归一化缓存纯属加速，写不成也不该让刷新失败，所以全程返回成功。
+# 元数据最后写：中途失败时上一份元数据已经删掉，缓存自然作废。
+source_normalized_cache_store() {
+  [ "$#" -eq 4 ] || return 0
+  local id=$1 cache=$2 raw_sha=$3 normalized=$4 norm_sha
+  [ -n "$raw_sha" ] || return 0
+  source_normalized_cache_paths "$cache" || return 0
+  [ -f "$normalized" ] && [ ! -L "$normalized" ] || return 0
+  rm -f "$SOURCE_NORM_CACHE_META" "$SOURCE_NORM_CACHE" "$SOURCE_NORM_CACHE_ALLOW" 2>/dev/null || return 0
+  norm_sha=$(sha256_file "$normalized") || return 0
+  cp "$normalized" "$SOURCE_NORM_CACHE.tmp.$$" 2>/dev/null || { rm -f "$SOURCE_NORM_CACHE.tmp.$$"; return 0; }
+  mv -f "$SOURCE_NORM_CACHE.tmp.$$" "$SOURCE_NORM_CACHE" 2>/dev/null || { rm -f "$SOURCE_NORM_CACHE.tmp.$$"; return 0; }
+  case "$id" in
+    custom_[1-9]*)
+      [ -f "${normalized}.allow" ] && [ ! -L "${normalized}.allow" ] || return 0
+      cp "${normalized}.allow" "$SOURCE_NORM_CACHE_ALLOW.tmp.$$" 2>/dev/null || {
+        rm -f "$SOURCE_NORM_CACHE_ALLOW.tmp.$$"
+        return 0
+      }
+      mv -f "$SOURCE_NORM_CACHE_ALLOW.tmp.$$" "$SOURCE_NORM_CACHE_ALLOW" 2>/dev/null || {
+        rm -f "$SOURCE_NORM_CACHE_ALLOW.tmp.$$"
+        return 0
+      }
+      ;;
+  esac
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$SOURCE_NORMALIZED_CACHE_VERSION" "$raw_sha" "$norm_sha" \
+    "${VALIDATE_RULE_COUNT:-0}" "${VALIDATE_ALLOW_COUNT:-0}" "${VALIDATE_SKIPPED_COUNT:-0}" \
+    > "$SOURCE_NORM_CACHE_META.tmp.$$" 2>/dev/null || {
+      rm -f "$SOURCE_NORM_CACHE_META.tmp.$$"
+      return 0
+    }
+  mv -f "$SOURCE_NORM_CACHE_META.tmp.$$" "$SOURCE_NORM_CACHE_META" 2>/dev/null || \
+    rm -f "$SOURCE_NORM_CACHE_META.tmp.$$"
+  return 0
+}
+
+# 校验一份已经落地的缓存：能命中归一化缓存就直接复用，否则照旧完整校验并把结果存下来。
+# 顺带导出原始内容摘要，调用方不必再算一遍。
+source_validate_cached_source() {
+  [ "$#" -eq 3 ] || return 64
+  local id=$1 cache=$2 normalized_dest=$3
+  SOURCE_RAW_SHA=$(sha256_file "$cache") || return 65
+  export SOURCE_RAW_SHA
+  if source_normalized_cache_load "$id" "$cache" "$SOURCE_RAW_SHA" "$normalized_dest"; then
+    return 0
+  fi
+  rm -f "$normalized_dest" "${normalized_dest}.allow"
+  validate_source_download "$id" "$cache" "$normalized_dest" || return
+  source_normalized_cache_store "$id" "$cache" "$SOURCE_RAW_SHA" "$normalized_dest"
 }
 
 source_run_fetcher() {
@@ -408,6 +503,8 @@ fetch_source() {
         FETCH_ALLOW_COUNT=$VALIDATE_ALLOW_COUNT
         FETCH_SKIPPED_COUNT=$VALIDATE_SKIPPED_COUNT
         FETCH_ALLOW_PATH=$VALIDATE_ALLOW_PATH
+        # 刚归一化完就存进缓存，之后只改配置的操作就不必再算一遍。
+        source_normalized_cache_store "$id" "$cache" "$FETCH_SHA" "$normalized_dest"
         export FETCH_STATE FETCH_ERROR FETCH_SHA FETCH_RULE_COUNT
         export FETCH_ALLOW_COUNT FETCH_SKIPPED_COUNT FETCH_ALLOW_PATH
         return 0
@@ -418,11 +515,11 @@ fetch_source() {
   done
 
   source_cache_path_prepare "$cache" || return
-  if [ -f "$cache" ] && [ ! -L "$cache" ] && validate_source_download "$id" "$cache" "$normalized_dest"; then
+  if [ -f "$cache" ] && [ ! -L "$cache" ] && source_validate_cached_source "$id" "$cache" "$normalized_dest"; then
     cp "$cache" "$raw_dest" || return 74
     FETCH_STATE=stale
     FETCH_ERROR=download_failed_using_cache
-    FETCH_SHA=$(sha256_file "$cache")
+    FETCH_SHA=$SOURCE_RAW_SHA
     FETCH_RULE_COUNT=$VALIDATE_RULE_COUNT
     FETCH_ALLOW_COUNT=$VALIDATE_ALLOW_COUNT
     FETCH_SKIPPED_COUNT=$VALIDATE_SKIPPED_COUNT
@@ -464,14 +561,14 @@ load_source_cache() {
   FETCH_ALLOW_PATH=-
   export FETCH_STATE FETCH_ERROR FETCH_RULE_COUNT FETCH_ALLOW_COUNT FETCH_SKIPPED_COUNT FETCH_ALLOW_PATH
   [ -f "$cache" ] && [ ! -L "$cache" ] || return 69
-  if ! validate_source_download "$id" "$cache" "$normalized_dest"; then
+  if ! source_validate_cached_source "$id" "$cache" "$normalized_dest"; then
     rm -f "$normalized_dest" "${normalized_dest}.allow"
     return 69
   fi
   cp "$cache" "$raw_dest" || return 74
   FETCH_STATE=fresh
   FETCH_ERROR=
-  FETCH_SHA=$(sha256_file "$cache") || return
+  FETCH_SHA=$SOURCE_RAW_SHA
   FETCH_RULE_COUNT=$VALIDATE_RULE_COUNT
   FETCH_ALLOW_COUNT=$VALIDATE_ALLOW_COUNT
   FETCH_SKIPPED_COUNT=$VALIDATE_SKIPPED_COUNT
@@ -490,23 +587,42 @@ source_refresh_target_validate() {
   "$BB" awk -F '\t' -v wanted="$target" '$1==wanted && $3==1{found=1} END{exit found?0:1}' "$sources" || return 65
 }
 
+# 用缓存装载来源时，健康状态不能被改写成“刚下载成功”，要把上一轮记下的状态与错误恢复回来。
+source_restore_cache_health() {
+  [ "$#" -eq 2 ] || return 64
+  local id=$1 url=$2 url_sha previous_health previous_state previous_error tab
+  url_sha=$(printf '%s' "$url" | sha256_file_stdin) || return
+  previous_health=$(source_previous_cache_health "$id" "$url_sha" 2>/dev/null) || return 0
+  tab=$(printf '\t')
+  previous_state=${previous_health%%"$tab"*}
+  previous_error=${previous_health#*"$tab"}
+  [ "$previous_error" != null ] || previous_error=
+  FETCH_STATE=$previous_state
+  FETCH_ERROR=$previous_error
+  export FETCH_STATE FETCH_ERROR
+}
+
 source_fetch_or_load_cache() {
   [ "$#" -eq 5 ] || return 64
-  local target_id=$1 id=$2 url=$3 raw_dest=$4 normalized_dest=$5 url_sha previous_health previous_state previous_error tab
+  local target_id=$1 id=$2 url=$3 raw_dest=$4 normalized_dest=$5
+  FETCH_USED_CACHE=0
+  export FETCH_USED_CACHE
   if [ -z "$target_id" ] || [ "$id" = "$target_id" ]; then
+    # 只改配置的操作（启停来源、存黑白名单、改例外……）不需要重新联网：
+    # 先用已经校验过的缓存重建规则，缓存缺失或损坏才回落到下载。
+    if [ "${RULE_FETCH_CACHE_FIRST-0}" = 1 ] && \
+      load_source_cache "$id" "$url" "$raw_dest" "$normalized_dest"; then
+      FETCH_USED_CACHE=1
+      export FETCH_USED_CACHE
+      source_restore_cache_health "$id" "$url"
+      return 0
+    fi
     fetch_source "$id" "$url" "$raw_dest" "$normalized_dest"
   else
     load_source_cache "$id" "$url" "$raw_dest" "$normalized_dest" || return
-    url_sha=$(printf '%s' "$url" | sha256_file_stdin) || return
-    if previous_health=$(source_previous_cache_health "$id" "$url_sha" 2>/dev/null); then
-      tab=$(printf '\t')
-      previous_state=${previous_health%%"$tab"*}
-      previous_error=${previous_health#*"$tab"}
-      [ "$previous_error" != null ] || previous_error=
-      FETCH_STATE=$previous_state
-      FETCH_ERROR=$previous_error
-      export FETCH_STATE FETCH_ERROR
-    fi
+    FETCH_USED_CACHE=1
+    export FETCH_USED_CACHE
+    source_restore_cache_health "$id" "$url"
   fi
 }
 

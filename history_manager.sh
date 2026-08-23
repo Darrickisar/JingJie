@@ -1255,32 +1255,8 @@ history_packages_json_from_normalized() {
   ' "$normalized"
 }
 
-history_packages_json() {
-  local uid=$1 tmp result=0
-  history_uint_valid "$uid" 4294967294 0 || return 65
-  tmp="$RULE_TMP/history-packages.$$"
-  history_packages_normalize "$tmp" || return
-  history_packages_json_from_normalized "$uid" "$tmp" || result=$?
-  rm -f "$tmp"
-  return "$result"
-}
-
 history_uint_valid() {
   decimal_uint_in_range "$@"
-}
-
-history_trace_address_valid() {
-  printf '%s\n' "$1" | "$BB" awk '
-    function valid_octet(v){return v~/^[0-9]+$/ && v+0<=255 && (v=="0" || v!~/^0/)}
-    BEGIN{ok=0}
-    {
-      if(split($0,a,".")!=4 || a[1]!="127") next
-      if(!valid_octet(a[2]) || !valid_octet(a[3]) || !valid_octet(a[4])) next
-      if(a[2]+0<64 || a[2]+0>71) next
-      ok=1
-    }
-    END{exit ok?0:1}
-  '
 }
 
 history_domain_filter_valid() {

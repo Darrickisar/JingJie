@@ -434,7 +434,7 @@
                     <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
                   </button>
                 </div>
-                <p class="muted" id="history-status-detail">开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电。</p>
+                <p class="muted" id="history-status-detail">开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电；放行的连接抓不到，放行明细在下方「规则日志」。</p>
               </div>
               <label class="switch-label history-switch-label" for="history-enabled">
                 <input class="source-switch write-action" id="history-enabled" type="checkbox" role="switch" aria-label="记录拦截历史" aria-controls="history-details" aria-expanded="false" disabled>
@@ -497,7 +497,7 @@
             <div class="rule-log-heading">
               <div>
                 <h3 id="rule-log-heading">规则日志</h3>
-                <p class="muted">仅在你手动载入时读取规则引擎文本记录，不会后台轮询。</p>
+                <p class="muted">仅在你手动载入时读取规则引擎文本记录，不会后台轮询。日志档位选「全部模块事件」后，每次刷新的放行与拦截明细都写在这里。</p>
               </div>
               <button class="button button-secondary" id="reload-logs-button" type="button">
                 <i data-lucide="scroll-text" aria-hidden="true"></i>

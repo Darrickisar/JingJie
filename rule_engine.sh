@@ -183,12 +183,19 @@ engine_mutate_and_apply() {
   config_mutate_locked "$verb" "$@"
   local result=$?
   if [ "$result" -eq 0 ]; then
+    # 改配置不等于内容过期：先用已校验的来源缓存重建规则，缓存缺失才会去下载。
+    # 这样启停来源、存黑白名单、改例外这类按钮不必再等一轮联网。
+    # 内容刷新仍由「立即刷新」、单源刷新和自动刷新负责。
+    RULE_FETCH_CACHE_FIRST=1
+    export RULE_FETCH_CACHE_FIRST
     if [ "$verb" = reset-rules ]; then
       engine_refresh_degraded_locked
     else
       engine_refresh_locked
     fi
     result=$?
+    RULE_FETCH_CACHE_FIRST=0
+    export RULE_FETCH_CACHE_FIRST
   fi
   set -e
   rules_lock_release rules || return

@@ -140,7 +140,9 @@ source_registry_remove_cache() {
   local id=$1
   source_registry_id_valid "$id" || return 65
   case "$id" in
-    awa|rule10007) rm -f "$CACHE_DIR/$id.hosts" ;;
+    # 归一化缓存跟着原始缓存一起走，删一个就得把它的 .norm 系列一并删掉。
+    awa|rule10007) rm -f "$CACHE_DIR/$id.hosts" "$CACHE_DIR/$id.hosts.norm" \
+      "$CACHE_DIR/$id.hosts.norm.allow" "$CACHE_DIR/$id.hosts.norm.meta" ;;
     custom_*) rm -rf "$CACHE_DIR/custom/$id" ;;
   esac
 }

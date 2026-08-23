@@ -11,14 +11,6 @@ status_result_valid() {
   case "$1" in ok|degraded|failed|rolled_back|critical) return 0 ;; *) return 1 ;; esac
 }
 
-status_serialize_projection() {
-  local phase=$1 result=$2 busy=$3
-  status_phase_valid "$phase" || return 65
-  status_result_valid "$result" || return 65
-  [ "$busy" = true ] || [ "$busy" = false ] || return 65
-  printf '%s\n' "{\"schemaVersion\":1,\"phase\":\"$phase\",\"result\":\"$result\",\"busy\":$busy,\"operationId\":null,\"operationVerb\":null,\"operationStartedAt\":null,\"initialRefreshPending\":false,\"autoRefresh\":{\"enabled\":false,\"intervalHours\":24},\"desiredSourcesRevision\":null,\"appliedSourcesRevision\":null,\"sourcesOutOfSync\":false,\"manualBlockCount\":0,\"manualAllowCount\":0,\"desiredMode\":null,\"activeMode\":null,\"activeGeneration\":null,\"alternateGeneration\":null,\"alternateAction\":\"none\",\"ruleCount\":0,\"lastSuccessAt\":null,\"lastFailureAt\":null,\"lastError\":null,\"mountTarget\":null,\"mountedSha256\":null,\"sources\":[]}"
-}
-
 status_nullable_string() {
   local escaped
   if [ -n "$1" ]; then

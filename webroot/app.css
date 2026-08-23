@@ -883,6 +883,18 @@ h3 {
 /* 折射层：SVG 位移滤镜每帧都要重算背景，代价明显高于模糊，
    因此只在「浓郁」档位开启，默认档位保持纯模糊。 */
 
+/* 切页时底栏背后的像素每帧都在变，位移滤镜就得跟着每帧重算一遍整块背景。
+   入场动画这两百多毫秒里把折射层摘掉：它本来就压在模糊层上、透明度只有 0.6，
+   一次滑动里看不出来，省下的却是切页最贵的一笔合成开销。
+   环境光斑同理先停帧，它们只是背景装饰。 */
+:root[data-switching][data-glass="strong"] .tab-bar::before {
+  display: none;
+}
+
+:root[data-switching] .ambient-orb {
+  animation-play-state: paused;
+}
+
 :root[data-surface="liquid"][data-glass="strong"] .tab-bar::before {
   content: "";
   position: absolute;
@@ -942,11 +954,18 @@ h3 {
 }
 
 .tab-panel[data-motion-direction="forward"]:not([hidden]) {
-  animation: panel-enter-forward 200ms var(--motion) both;
+  animation: panel-enter-forward 210ms var(--motion) both;
 }
 
 .tab-panel[data-motion-direction="backward"]:not([hidden]) {
-  animation: panel-enter-backward 200ms var(--motion) both;
+  animation: panel-enter-backward 210ms var(--motion) both;
+}
+
+/* 入场动画只动 transform 与 opacity，这两样能交给合成器。will-change 只在
+   动画那两百多毫秒里挂着：常挂会让每个隐藏面板都长期占一层纹理，
+   在 WebView 上反而更卡。 */
+.tab-panel[data-motion-direction]:not([hidden]) {
+  will-change: transform, opacity;
 }
 
 @keyframes panel-enter {
@@ -956,17 +975,25 @@ h3 {
   }
 }
 
+/* 切换用「淡入穿透 + 纵向位移」，两条都要克制：
+   横向位移不能用——面板本来就是满宽的，向右挪一下就把文档宽度顶出视口，
+   手机上表现为整页能左右拖出一小截；纵向位移由文档自身的竖向滚动吸收。
+   缩放也不能用——动画期间元素的实测尺寸会被整体缩小，
+   点按目标的最小尺寸会因此不达标（0.988 × 44px = 43.5px）。
+   只留 translate 与 opacity，既是合成器友好的两个属性，也不动任何实测尺寸。
+   前进从下方来、后退从上方来，方向感靠这个区分。 */
+
 @keyframes panel-enter-forward {
   from {
-    opacity: 0.42;
-    transform: translate3d(12px, 0, 0);
+    opacity: 0.28;
+    transform: translate3d(0, 14px, 0);
   }
 }
 
 @keyframes panel-enter-backward {
   from {
-    opacity: 0.42;
-    transform: translate3d(-12px, 0, 0);
+    opacity: 0.28;
+    transform: translate3d(0, -14px, 0);
   }
 }
 
@@ -2140,6 +2167,13 @@ dialog input[aria-invalid] {
   padding: 0 18px;
 }
 
+/* 重查期间旧行留在原地，压暗一档表明这批数据已经过期。
+   只动 opacity，交给合成器，不会再触发一次布局。 */
+.history-list[aria-busy="true"] {
+  opacity: 0.55;
+  transition: opacity 120ms var(--motion);
+}
+
 .history-row {
   position: relative;
   min-width: 0;
@@ -2153,7 +2187,11 @@ dialog input[aria-invalid] {
   border-bottom: 1px solid var(--line);
   background: transparent;
   content-visibility: auto;
-  contain-intrinsic-size: 70px;
+  /* auto 让浏览器记住这一行真正渲染过的尺寸，之后就按实测值占位。
+     原来写死 70px：域名一换行真实行高就到 110px 上下，被跳过的行全按 70px 占位，
+     整份列表的滚动高度会短出好几屏，于是滚不到底、看着像记录没显示全，
+     改一次筛选条件重建列表才恢复正常。后面的 96px 只是从没渲染过时的兜底估计。 */
+  contain-intrinsic-size: auto 96px;
 }
 
 .history-row-main,
@@ -2993,7 +3031,9 @@ dialog form {
       "meta actions";
     gap: 7px;
     padding: 9px 0;
-    contain-intrinsic-size: 94px;
+    /* 手机走的是这一档：两行布局的真实行高在 110px 上下，写死 94px 会把
+       被跳过的行占位算短，列表滚不到底。同样交给 auto 去记实测值。 */
+    contain-intrinsic-size: auto 112px;
   }
 
   .history-row-meta {
