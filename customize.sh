@@ -11,6 +11,33 @@ for reader in "$MODDIR"/tools/history_reader_arm32 "$MODDIR"/tools/history_reade
   chmod 0755 "$reader" || abort "history_reader_permission_failed"
 done
 
+# Keep only the compressed DoH companion this device can run. The module ships
+# arm64 and arm32; other architectures acquire the pinned archive on demand.
+companion_arch=
+case "${ARCH-}" in
+  arm64) companion_arch=arm64 ;;
+  arm) companion_arch=arm32 ;;
+  x64) companion_arch=x86_64 ;;
+  x86) companion_arch=x86 ;;
+esac
+if [ -z "$companion_arch" ] && command -v getprop >/dev/null 2>&1; then
+  case "$(getprop ro.product.cpu.abi 2>/dev/null)" in
+    arm64*|aarch64) companion_arch=arm64 ;;
+    armeabi*|armv7*|armv8l) companion_arch=arm32 ;;
+    x86_64) companion_arch=x86_64 ;;
+    x86|i686) companion_arch=x86 ;;
+  esac
+fi
+if [ -n "$companion_arch" ]; then
+  for archive in "$MODDIR"/companions/jingjie-doh-proxy-*-v1.0.gz; do
+    [ -f "$archive" ] && [ ! -L "$archive" ] || continue
+    case "$archive" in
+      */"jingjie-doh-proxy-$companion_arch-v1.0.gz") continue ;;
+    esac
+    rm -f "$archive" || true
+  done
+fi
+
 /system/bin/sh "$MODDIR/update.sh" || true
 
 if command -v ui_print >/dev/null 2>&1; then

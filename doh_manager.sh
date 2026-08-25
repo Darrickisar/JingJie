@@ -74,6 +74,42 @@ doh_manager_set_error() {
   export DOH_ERROR_CODE
 }
 
+# A single exit status cannot say which step produced it: 65 means both "the
+# committed triplet disagrees" and "a selected UID belongs to the manager", and
+# 69 means both "the device cannot install the redirect rules" and "the server
+# name did not resolve". Recording the step lets every distinct cause reach the
+# user instead of collapsing into one 加密 DNS 运行失败.
+doh_stage_set() {
+  DOH_FAILURE_STAGE=$1
+  export DOH_FAILURE_STAGE
+}
+
+doh_manager_error_for() {
+  [ "$#" -eq 3 ] || return 64
+  local stage=$1 code=$2 fallback=$3 error=
+  case "$stage:$code" in
+    endpoint:65|endpoint:66) error=invalid_endpoint ;;
+    private_dns:75) error=private_dns_active ;;
+    package_state:66|package_state:67) error=package_state_invalid ;;
+    bootstrap:69) error=bootstrap_unresolved ;;
+    firewall:69) error=firewall_unsupported ;;
+    companion:*) error=companion_unavailable ;;
+    companion_start:*) error=companion_exited ;;
+    probe:*) error=upstream_unavailable ;;
+    commit:*) error=commit_failed ;;
+  esac
+  if [ -z "$error" ]; then
+    case "$code" in
+      65) error=invalid_config ;;
+      66|67) error=package_state_invalid ;;
+      75) error=private_dns_active ;;
+      *) error=$fallback ;;
+    esac
+  fi
+  doh_error_valid "$error" || error=$fallback
+  printf '%s\n' "$error"
+}
+
 doh_prop_value() {
   [ "$#" -eq 2 ] || return 64
   [ -f "$1" ] && [ ! -L "$1" ] || return 66
@@ -109,7 +145,10 @@ doh_private_dns_check() {
     command -v settings >/dev/null 2>&1 || return 70
     mode=$(settings get global private_dns_mode 2>/dev/null) || return 70
   fi
-  [ "$mode" = off ] || return 75
+  case "$mode" in
+    off|opportunistic|null|'') return 0 ;;
+    *) return 75 ;;
+  esac
 }
 
 doh_proxy_owned_pid() {
@@ -158,41 +197,119 @@ doh_endpoint_host() {
   printf '%s\n' "$host"
 }
 
+doh_ipv4_candidate_valid() {
+  local rest=$1 octet count=0
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      *.*) octet=${rest%%.*}; rest=${rest#*.} ;;
+      *) octet=$rest; rest= ;;
+    esac
+    # A leading zero is rejected here because the companion's own parser
+    # (net/netip) rejects it, and one unusable candidate fails the whole config.
+    case "$octet" in ''|*[!0-9]*|0?*) return 1 ;; esac
+    [ "${#octet}" -le 3 ] && [ "$octet" -le 255 ] || return 1
+    count=$((count + 1))
+  done
+  [ "$count" -eq 4 ]
+}
+
+doh_ipv6_candidate_valid() {
+  local value=$1 rest group count=0 compressed=0
+  case "$value" in *:::*) return 1 ;; esac
+  case "$value" in *::*) compressed=1 ;; esac
+  case "$value" in :*) case "$value" in ::*) ;; *) return 1 ;; esac ;; esac
+  case "$value" in *:) case "$value" in *::) ;; *) return 1 ;; esac ;; esac
+  rest=$value
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      *:*) group=${rest%%:*}; rest=${rest#*:} ;;
+      *) group=$rest; rest= ;;
+    esac
+    [ -n "$group" ] || continue
+    case "$group" in *[!0-9A-Fa-f]*) return 1 ;; esac
+    [ "${#group}" -le 4 ] || return 1
+    count=$((count + 1))
+  done
+  if [ "$compressed" -eq 1 ]; then
+    [ "$count" -le 7 ]
+  else
+    [ "$count" -eq 8 ]
+  fi
+}
+
 doh_ip_candidate_valid() {
-  case "$1" in
-    ''|0.0.0.0|127.*|255.255.255.255|::|::1|ff*|FF*|*[!0-9A-Fa-f:.]*) return 1 ;;
-    *.*.*.*|*:*) return 0 ;;
+  local value=$1
+  case "$value" in
+    ''|0.0.0.0|127.*|255.255.255.255|::|::1|ff*|FF*) return 1 ;;
+  esac
+  # An address is dotted-quad or colon-separated, never both. Rejecting the
+  # mixed form is what stops a resolver's own "Address: 8.8.8.8:53" header line
+  # from being stored as a bootstrap address the companion then refuses.
+  case "$value" in
+    *.*:*|*:*.*|.*|*.) return 1 ;;
+  esac
+  case "$value" in
+    *:*) doh_ipv6_candidate_valid "$value" ;;
+    *.*) doh_ipv4_candidate_valid "$value" ;;
     *) return 1 ;;
   esac
 }
 
 doh_resolve_bootstrap_ips() {
   [ "$#" -eq 2 ] || return 64
-  local endpoint=$1 output=$2 host raw="$RULE_TMP/doh-resolve.$$" ip count=0
+  local endpoint=$1 output=$2 host method ip raw="$RULE_TMP/doh-resolve.$$" count=0
   host=$(doh_endpoint_host "$endpoint") || return
-  : > "$raw" || return 74
-  if [ -n "${DOH_BOOTSTRAP_IPS-}" ]; then
-    printf '%s\n' $DOH_BOOTSTRAP_IPS > "$raw" || { rm -f "$raw"; return 74; }
-  elif doh_ip_candidate_valid "$host"; then
-    printf '%s\n' "$host" > "$raw" || { rm -f "$raw"; return 74; }
-  elif command -v getent >/dev/null 2>&1; then
-    getent ahosts "$host" 2>/dev/null | "$BB" awk '{print $1}' > "$raw" || true
-  elif "$BB" --list 2>/dev/null | "$BB" grep -x nslookup >/dev/null 2>&1; then
-    "$BB" nslookup "$host" 2>/dev/null | "$BB" awk '
-      /^Address [0-9]*: /{print $3; next}
-      /^Address: /{print $2}
-    ' > "$raw" || true
-  fi
-  : > "$output" || { rm -f "$raw"; return 74; }
-  while IFS= read -r ip || [ -n "$ip" ]; do
-    doh_ip_candidate_valid "$ip" || continue
-    printf '%s\n' "$ip" >> "$output" || { rm -f "$raw" "$output"; return 74; }
-    count=$((count + 1))
-    [ "$count" -lt 8 ] || break
-  done < "$raw"
+  : > "$output" || return 74
+  # Every method is tried until one yields a usable address. Choosing a single
+  # method by tool presence meant a device where the tool exists but resolves
+  # nothing never reached the next one, and DoH could not be enabled at all.
+  for method in override literal getent nslookup ping; do
+    : > "$raw" || { rm -f "$raw" "$output"; return 74; }
+    case "$method" in
+      override)
+        [ -n "${DOH_BOOTSTRAP_IPS-}" ] || continue
+        printf '%s\n' $DOH_BOOTSTRAP_IPS > "$raw" || { rm -f "$raw" "$output"; return 74; }
+        ;;
+      literal)
+        doh_ip_candidate_valid "$host" || continue
+        printf '%s\n' "$host" > "$raw" || { rm -f "$raw" "$output"; return 74; }
+        ;;
+      getent)
+        command -v getent >/dev/null 2>&1 || continue
+        getent ahosts "$host" 2>/dev/null | "$BB" awk '{print $1}' > "$raw" || true
+        ;;
+      nslookup)
+        "$BB" --list 2>/dev/null | "$BB" grep -x nslookup >/dev/null 2>&1 || continue
+        # BusyBox echoes the resolver's own Server:/Address: header before the
+        # answer, so only lines after "Name:" describe the host. $NF covers the
+        # "Address:" and older "Address 1:" layouts alike, and any run of spaces
+        # or tabs between the label and the value -- the previous pattern
+        # required exactly one space and silently matched nothing.
+        "$BB" nslookup "$host" 2>/dev/null | "$BB" awk '
+          /^Name:/{answer=1; next}
+          answer && /^Address/{print $NF}
+        ' > "$raw" || true
+        ;;
+      ping)
+        command -v ping >/dev/null 2>&1 || continue
+        # Android always ships ping and it resolves through bionic like any app,
+        # printing the address on its first line even when the host drops the
+        # echo request, so it is a usable last resort.
+        "$BB" timeout -s TERM -k 1 5 ping -c 1 "$host" 2>/dev/null | "$BB" awk '
+          NR==1 && match($0, /\([0-9A-Fa-f.:]+\)/){print substr($0, RSTART + 1, RLENGTH - 2); exit}
+        ' > "$raw" || true
+        ;;
+    esac
+    while IFS= read -r ip || [ -n "$ip" ]; do
+      doh_ip_candidate_valid "$ip" || continue
+      printf '%s\n' "$ip" >> "$output" || { rm -f "$raw" "$output"; return 74; }
+      count=$((count + 1))
+    done < "$raw"
+    [ "$count" -eq 0 ] || break
+  done
   rm -f "$raw"
   [ "$count" -gt 0 ] || { rm -f "$output"; return 69; }
-  LC_ALL=C "$BB" sort -u "$output" > "$output.sorted" || { rm -f "$output" "$output.sorted"; return 74; }
+  LC_ALL=C "$BB" sort -u "$output" | "$BB" head -n 8 > "$output.sorted" || { rm -f "$output" "$output.sorted"; return 74; }
   atomic_replace_file "$output.sorted" "$output" || { rm -f "$output" "$output.sorted"; return 74; }
   chmod 600 "$output" || { rm -f "$output"; return 74; }
 }
@@ -321,17 +438,23 @@ doh_manager_restore_active() {
 
 doh_manager_activate() {
   [ "$#" -ge 1 ] && [ "$#" -le 2 ] || return 64
-  local intent=$1 mode old_slot slot firewall_slot port transition config_file result now
+  local intent=$1 mode old_slot slot firewall_slot port transition config_file result now uid_stage
   case "$intent" in enable|boot) ;; *) return 64 ;; esac
   DOH_ACTIVATION_COMMITTED=0
   DOH_ACTIVATION_RESTORE_SAFE=1
+  DOH_COMPANION_UNAVAILABLE=0
+  doh_stage_set config
   mode=$(doh_prop_value "$DOH_CONFIG_STATE" desired_mode) || return
   case "$mode" in global|selected) ;; off) return 0 ;; *) return 65 ;; esac
   doh_triplet_validate "$DOH_CONFIG_STATE" "$DOH_CONFIG_ENDPOINT" "$DOH_CONFIG_UIDS" || return
   [ "$mode" != selected ] || doh_validate_uid_ownership "$DOH_CONFIG_UIDS" || return
+  doh_stage_set private_dns
   doh_private_dns_check || return
+  doh_stage_set package_state
   doh_proxy_uid_available || return
-  doh_companion_ensure "$intent" || return
+  doh_stage_set companion
+  doh_companion_ensure "$intent" || { result=$?; DOH_COMPANION_UNAVAILABLE=1; return "$result"; }
+  doh_stage_set config
   if [ "$#" -eq 2 ]; then old_slot=$2; else old_slot=$(doh_prop_value "$DOH_CONFIG_STATE" active_slot) || return; fi
   slot=$(doh_inactive_slot "$old_slot") || return
   firewall_slot=$(doh_slot_firewall "$slot") || return
@@ -339,7 +462,9 @@ doh_manager_activate() {
   transition=$(doh_transition_token_new) || return
   config_file="$DOH_RUNTIME_DIR/config-$transition-$slot.prop"
   [ ! -e "$config_file" ] && [ ! -L "$config_file" ] || return 76
+  doh_stage_set bootstrap
   doh_config_prepare "$DOH_CONFIG_ENDPOINT" "$slot" "$transition" "$config_file" || return
+  doh_stage_set probe
   doh_probe "$config_file"
   result=$?
   if [ "$result" -ne 0 ]; then
@@ -348,6 +473,7 @@ doh_manager_activate() {
   fi
   now=$(date +%s 2>/dev/null || printf 0)
   doh_runtime_write starting absent system_dns "$transition" "$slot" null "$now" || { rm -f "$config_file"; return 74; }
+  doh_stage_set companion_start
   process_start_doh "$slot" "$transition" "$config_file"
   result=$?
   rm -f "$config_file"
@@ -355,8 +481,22 @@ doh_manager_activate() {
     doh_activation_compensate "$slot" "$transition" 0 companion_exited
     return "$result"
   fi
-  firewall_doh_stage "$mode" "$firewall_slot" "$port" "$transition" "$DOH_CONFIG_UIDS"
+  doh_stage_set firewall
+  # firewall_manager accepts a uid file only from RULE_TMP and refuses every
+  # other path with 65 (firewall_doh_uid_file_valid), so the committed CONFIG_DIR
+  # copy has to be staged there first. Handing over the config path directly meant
+  # staging was rejected on every attempt and encrypted DNS could never turn on.
+  # app_policy_apply already stages its uid file the same way.
+  uid_stage="$RULE_TMP/doh-stage-uids-$transition.$$"
+  rm -f "$uid_stage"
+  if ! cp "$DOH_CONFIG_UIDS" "$uid_stage" || ! chmod 600 "$uid_stage"; then
+    rm -f "$uid_stage"
+    doh_activation_compensate "$slot" "$transition" 0 runtime_failed
+    return 74
+  fi
+  firewall_doh_stage "$mode" "$firewall_slot" "$port" "$transition" "$uid_stage"
   result=$?
+  rm -f "$uid_stage"
   if [ "$result" -ne 0 ]; then
     doh_activation_compensate "$slot" "$transition" 0 runtime_failed
     return "$result"
@@ -372,6 +512,7 @@ doh_manager_activate() {
     doh_activation_compensate "$slot" "$transition" 1 runtime_failed
     return "$result"
   fi
+  doh_stage_set commit
   doh_commit_effective "$mode" "$transition" "$slot" || {
     result=$?
     doh_activation_compensate "$slot" "$transition" 1 commit_failed
@@ -398,6 +539,8 @@ doh_fallback_off() {
 doh_manager_apply() {
   [ "$#" -eq 3 ] || return 64
   local result error=runtime_failed recovery
+  DOH_COMPANION_UNAVAILABLE=0
+  doh_stage_set config
   rules_lock_acquire doh || return
   doh_bootstrap || { result=$?; rules_lock_release doh; return "$result"; }
   DOH_ACTIVATION_COMMITTED=0
@@ -417,7 +560,8 @@ doh_manager_apply() {
     fi
   fi
   if [ "$result" -ne 0 ]; then
-    case "$result" in 65) error=invalid_config ;; 66|67) error=package_state_invalid ;; 75) error=private_dns_active ;; esac
+    error=$(doh_manager_error_for "${DOH_FAILURE_STAGE:-config}" "$result" runtime_failed)
+    if [ "${DOH_COMPANION_UNAVAILABLE:-0}" -eq 1 ]; then error=companion_unavailable; fi
     if [ "$DOH_PREVIOUS_ACTIVE" -eq 1 ] && [ "$DOH_ACTIVATION_COMMITTED" -eq 0 ] && [ "$DOH_ACTIVATION_RESTORE_SAFE" -eq 1 ]; then
       doh_manager_restore_active "$recovery" >/dev/null 2>&1 || result=76
     elif [ "$DOH_PREVIOUS_ACTIVE" -eq 0 ]; then
@@ -433,22 +577,31 @@ doh_manager_apply() {
 
 doh_manager_test() {
   [ "$#" -eq 1 ] || return 64
-  local endpoint_tmp config_file transition result error=test_failed
+  local endpoint_tmp config_file transition result error=
   rules_lock_acquire doh || return
   doh_bootstrap || { result=$?; rules_lock_release doh; return "$result"; }
   endpoint_tmp="$RULE_TMP/doh-test-endpoint.$$"
+  doh_stage_set endpoint
   doh_endpoint_value_write "$1" "$endpoint_tmp" || result=$?
-  [ -n "${result-}" ] || doh_companion_ensure test || result=$?
+  [ -n "${result-}" ] || doh_stage_set companion
+  [ -n "${result-}" ] || doh_companion_ensure test || { result=$?; error=companion_unavailable; }
   if [ -z "${result-}" ]; then transition=$(doh_transition_token_new) || result=$?; fi
   if [ -z "${result-}" ]; then
     config_file="$DOH_RUNTIME_DIR/test-$transition.prop"
+    doh_stage_set bootstrap
     doh_config_prepare "$endpoint_tmp" a "$transition" "$config_file" || result=$?
   fi
+  # A probe failure during an explicit test is reported as test_failed, not
+  # upstream_unavailable: nothing was switched over, so there is no fallback to
+  # tell the user about -- the URL simply did not answer.
+  [ -n "${result-}" ] || doh_stage_set test_probe
   [ -n "${result-}" ] || doh_probe "$config_file" || result=$?
   if [ -z "${result-}" ]; then doh_test_endpoint "$1" || result=$?; fi
   rm -f "$endpoint_tmp" "${config_file-}"
   if [ -n "${result-}" ]; then
-    case "$result" in 65|66) error=invalid_endpoint ;; esac
+    if [ -z "$error" ]; then
+      error=$(doh_manager_error_for "${DOH_FAILURE_STAGE:-endpoint}" "$result" test_failed)
+    fi
     doh_manager_set_error "$error" || true
   else
     result=0
@@ -499,6 +652,7 @@ doh_manager_disable() {
 doh_manager_boot() {
   [ "$#" -eq 0 ] || return 64
   local mode result error=runtime_failed
+  DOH_COMPANION_UNAVAILABLE=0
   rules_lock_acquire doh || return
   doh_bootstrap || { result=$?; rules_lock_release doh; return "$result"; }
   mode=$(doh_prop_value "$DOH_CONFIG_STATE" desired_mode) || { result=$?; rules_lock_release doh; return "$result"; }
@@ -509,7 +663,8 @@ doh_manager_boot() {
   doh_manager_activate boot
   result=$?
   if [ "$result" -ne 0 ]; then
-    case "$result" in 65|66|69) error=companion_unavailable ;; 75) error=private_dns_active ;; esac
+    error=$(doh_manager_error_for "${DOH_FAILURE_STAGE:-config}" "$result" runtime_failed)
+    if [ "${DOH_COMPANION_UNAVAILABLE:-0}" -eq 1 ]; then error=companion_unavailable; fi
     doh_fallback_off "$error" >/dev/null 2>&1 || true
   fi
   rules_lock_release doh || return
@@ -599,6 +754,7 @@ doh_manager_cleanup_uninstall() {
 doh_manager_dispatch() {
   DOH_ERROR_CODE=
   export DOH_ERROR_CODE
+  doh_stage_set config
   case "${1-}:$#" in
     test:2) doh_manager_test "$2" ;;
     apply:4) doh_manager_apply "$2" "$3" "$4" ;;

@@ -525,6 +525,12 @@ operation_error_message() {
     commit_failed) printf '%s\n' '加密 DNS 配置保存失败' ;;
     recovery_failed) printf '%s\n' '加密 DNS 恢复失败' ;;
     runtime_failed) printf '%s\n' '加密 DNS 运行失败' ;;
+    bootstrap_unresolved) printf '%s\n' '无法解析加密 DNS 服务器域名' ;;
+    firewall_unsupported) printf '%s\n' '当前内核缺少加密 DNS 转发所需的防火墙能力' ;;
+    private_dns_active) printf '%s\n' '系统私人 DNS 指定了主机名' ;;
+    companion_unavailable) printf '%s\n' '加密 DNS 组件不可用' ;;
+    upstream_unavailable) printf '%s\n' '加密 DNS 上游不可用' ;;
+    companion_exited) printf '%s\n' '加密 DNS 组件已退出' ;;
     *) return 65 ;;
   esac
 }

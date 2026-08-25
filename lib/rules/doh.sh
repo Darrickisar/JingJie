@@ -22,6 +22,7 @@ doh_init_paths() {
   DOH_TX_MARKER="$DOH_TX_DIR/phase.prop"
   DOH_COMPANION_MANIFEST=${DOH_COMPANION_MANIFEST:-$MODDIR/assets/doh-companions.tsv}
   DOH_COMPANION_TARGET=${DOH_COMPANION_TARGET:-$MODDIR/tools/jingjie_doh_proxy}
+  DOH_COMPANION_BUNDLE_DIR=${DOH_COMPANION_BUNDLE_DIR:-$MODDIR/companions}
   export DOH_CONFIG_STATE DOH_CONFIG_ENDPOINT DOH_CONFIG_UIDS DOH_RUNTIME_DIR
   export DOH_RUNTIME_STATE DOH_LAST_TEST DOH_TX_DIR DOH_TX_PREVIOUS DOH_TX_STAGED DOH_TX_MARKER
 }
@@ -66,19 +67,66 @@ doh_companion_manifest_row() {
   ' "$manifest"
 }
 
+doh_companion_fetch_android() {
+  [ "$#" -eq 3 ] || return 64
+  local url=$1 output=$2 maximum=$3 app_process dex staged
+  app_process=${RULE_APP_PROCESS_BIN:-/system/bin/app_process}
+  dex=${RULE_FETCHER_DEX:-$MODDIR/tools/rule_fetcher.dex}
+  [ -x "$app_process" ] && [ -f "$dex" ] && [ ! -L "$dex" ] || return 69
+  [ "$maximum" -ge 1 ] && [ "$maximum" -le 16777216 ] || return 65
+  staged="$output.fetch"
+  rm -f "$staged" "$staged.part"
+  CLASSPATH="$dex" "$BB" timeout -s TERM -k 1 120 \
+    "$app_process" /system/bin --nice-name=jingjie-fetcher com.jingjie.RuleFetcher \
+    "$url" "$staged" "$maximum" 10000 30000 >/dev/null 2>&1 || {
+      rm -f "$staged" "$staged.part"
+      return 74
+    }
+  [ -f "$staged" ] && [ ! -L "$staged" ] || { rm -f "$staged" "$staged.part"; return 74; }
+  "$BB" cat "$staged" > "$output" || { rm -f "$staged" "$staged.part"; return 74; }
+  rm -f "$staged" "$staged.part"
+}
+
+doh_companion_bundled_copy() {
+  [ "$#" -eq 3 ] || return 64
+  local asset=$1 output=$2 maximum=$3 bundled actual_size
+  bundled=${DOH_COMPANION_BUNDLE_DIR:-$MODDIR/companions}/$asset
+  [ -f "$bundled" ] && [ ! -L "$bundled" ] || return 66
+  [ -f "$output" ] && [ ! -L "$output" ] || return 66
+  actual_size=$(wc -c < "$bundled" | "$BB" tr -d ' ') || return 74
+  [ "$actual_size" -le "$maximum" ] || return 65
+  "$BB" cat "$bundled" > "$output" || return 74
+}
+
 doh_companion_download() {
   [ "$#" -eq 3 ] || return 64
-  local url=$1 output=$2 maximum=$3 actual_size limit
+  local url=$1 output=$2 maximum=$3 actual_size limit result=69
   limit=$((maximum + 1))
   case "$url" in https://github.com/Darrickisar/JingJie/releases/download/v1.0/*) ;; *) return 65 ;; esac
   [ -f "$output" ] && [ ! -L "$output" ] || return 66
   if command -v curl >/dev/null 2>&1; then
-    (set -o pipefail; curl --fail --location --proto '=https' --connect-timeout 10 --max-time 30 --output - "$url" | "$BB" head -c "$limit" > "$output") || { rm -f "$output"; return 74; }
-  elif command -v wget >/dev/null 2>&1; then
-    (set -o pipefail; wget --https-only --timeout=10 --tries=1 -O - "$url" | "$BB" head -c "$limit" > "$output") || { rm -f "$output"; return 74; }
-  else
-    return 69
+    if (set -o pipefail; curl --fail --location --proto '=https' --connect-timeout 10 --max-time 30 --output - "$url" | "$BB" head -c "$limit" > "$output"); then
+      result=0
+    else
+      result=74
+    fi
   fi
+  if [ "$result" -ne 0 ] && command -v wget >/dev/null 2>&1; then
+    if (set -o pipefail; wget --https-only --timeout=10 --tries=1 -O - "$url" | "$BB" head -c "$limit" > "$output"); then
+      result=0
+    else
+      result=74
+    fi
+  fi
+  if [ "$result" -ne 0 ] && [ -f "$output" ] && [ ! -L "$output" ]; then
+    : > "$output" || { rm -f "$output"; return 74; }
+    if doh_companion_fetch_android "$url" "$output" "$maximum"; then
+      result=0
+    else
+      result=$?
+    fi
+  fi
+  [ "$result" -eq 0 ] || { rm -f "$output"; return "$result"; }
   [ -f "$output" ] && [ ! -L "$output" ] || return 65
   actual_size=$(wc -c < "$output" | "$BB" tr -d ' ') || { rm -f "$output"; return 74; }
   [ "$actual_size" -le "$maximum" ] || { rm -f "$output"; return 65; }
@@ -114,12 +162,17 @@ EOF
     return 0
   fi
   rm -f "$target" || return 74
-  [ "$intent" = boot ] && return 65
   mkdir -p "$DOH_RUNTIME_DIR" "$MODDIR/tools" || return 73
   chmod 700 "$DOH_RUNTIME_DIR" || return 74
   download=$("$BB" mktemp "$DOH_RUNTIME_DIR/download.XXXXXX") || return 74
   [ -f "$download" ] && [ ! -L "$download" ] || { rm -f "$download"; return 65; }
-  doh_companion_download "$url" "$download" "$gzip_size" || { result=$?; rm -f "$download"; return "$result"; }
+  if ! doh_companion_bundled_copy "$asset" "$download" "$gzip_size"; then
+    if [ "$intent" = boot ]; then
+      rm -f "$download"
+      return 65
+    fi
+    doh_companion_download "$url" "$download" "$gzip_size" || { result=$?; rm -f "$download"; return "$result"; }
+  fi
   doh_companion_file_integrity_validate "$download" "$gzip_size" "$gzip_hash" || { rm -f "$download"; return 65; }
   binary=$("$BB" mktemp "$MODDIR/tools/.jingjie_doh_proxy.XXXXXX") || { rm -f "$download"; return 74; }
   [ -f "$binary" ] && [ ! -L "$binary" ] || { rm -f "$download" "$binary"; return 65; }
@@ -133,7 +186,7 @@ EOF
 
 doh_error_valid() {
   case "$1" in
-    invalid_endpoint|invalid_config|package_state_invalid|test_failed|commit_failed|recovery_failed|runtime_failed|private_dns_active|companion_unavailable|upstream_unavailable|companion_exited) return 0 ;;
+    invalid_endpoint|invalid_config|package_state_invalid|test_failed|commit_failed|recovery_failed|runtime_failed|private_dns_active|companion_unavailable|upstream_unavailable|companion_exited|bootstrap_unresolved|firewall_unsupported) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -341,7 +394,7 @@ doh_state_validate_file() {
     $1=="transition_token" && $2!="null" && $2!~/^[0-9a-f]{16}$/{bad()}
     $1=="active_slot" && $2!="null" && $2!~/^[ab]$/{bad()}
     $1=="updated_at" && $2!~/^[0-9]+$/{bad()}
-    $1=="last_error" && $2!~/^(null|invalid_endpoint|invalid_config|package_state_invalid|test_failed|commit_failed|recovery_failed|runtime_failed|private_dns_active|companion_unavailable|upstream_unavailable|companion_exited)$/{bad()}
+    $1=="last_error" && $2!~/^(null|invalid_endpoint|invalid_config|package_state_invalid|test_failed|commit_failed|recovery_failed|runtime_failed|private_dns_active|companion_unavailable|upstream_unavailable|companion_exited|bootstrap_unresolved|firewall_unsupported)$/{bad()}
     END{if(NR!=10)bad()}
   ' "$file"
 }
@@ -488,7 +541,7 @@ doh_runtime_defaults() {
     $1=="transition_token"&&$2!="null"&&$2!~/^[0-9a-f]{16}$/{bad()}
     $1=="active_slot"&&$2!~/^(null|a|b)$/{bad()}
     $1=="updated_at"&&$2!~/^[0-9]+$/{bad()}
-    $1=="last_error"&&$2!~/^(null|invalid_endpoint|invalid_config|package_state_invalid|test_failed|commit_failed|recovery_failed|runtime_failed|private_dns_active|companion_unavailable|upstream_unavailable|companion_exited)$/{bad()}
+    $1=="last_error"&&$2!~/^(null|invalid_endpoint|invalid_config|package_state_invalid|test_failed|commit_failed|recovery_failed|runtime_failed|private_dns_active|companion_unavailable|upstream_unavailable|companion_exited|bootstrap_unresolved|firewall_unsupported)$/{bad()}
     END{if(NR!=8)bad()}
   ' "$DOH_RUNTIME_STATE" || return 65
   chmod 600 "$DOH_RUNTIME_STATE" "$DOH_LAST_TEST" || return 74

@@ -304,6 +304,17 @@
               </button>
             </div>
             <div class="collapsible-body doh-body" id="doh-body">
+            <div class="doh-url-row">
+              <label class="doh-field" for="doh-endpoint">
+                <span>DoH URL</span>
+                <input class="write-action" id="doh-endpoint" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="https://dns.example/dns-query" disabled>
+              </label>
+              <button class="button button-secondary write-action" id="doh-test" type="button" disabled>
+                <i data-lucide="gauge" aria-hidden="true"></i>
+                <span>检测</span>
+              </button>
+            </div>
+            <p class="doh-test-result" id="doh-test-result" aria-live="polite"></p>
             <fieldset class="segmented-control doh-mode" id="doh-mode" disabled>
               <legend class="visually-hidden">选择加密 DNS 模式</legend>
               <label>
@@ -319,17 +330,6 @@
                 <span><i data-lucide="apps" aria-hidden="true"></i>所选应用</span>
               </label>
             </fieldset>
-            <div class="doh-url-row">
-              <label class="doh-field" for="doh-endpoint">
-                <span>DoH URL</span>
-                <input class="write-action" id="doh-endpoint" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="https://dns.example/dns-query" disabled>
-              </label>
-              <button class="button button-secondary write-action" id="doh-test" type="button" disabled>
-                <i data-lucide="gauge" aria-hidden="true"></i>
-                <span>检测</span>
-              </button>
-            </div>
-            <p class="doh-test-result" id="doh-test-result" aria-live="polite"></p>
             <div class="doh-selected-region" id="doh-selected-region" hidden>
               <div class="doh-selected-tools">
                 <label class="doh-field" for="doh-app-search">

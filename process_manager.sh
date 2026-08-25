@@ -216,10 +216,17 @@ process_doh_ready_validate() {
   local file=$1 slot=$2 transition=$3 port line
   process_doh_slot_valid "$slot" || return
   process_doh_transition_valid "$transition" || return
+  # The 4>"$ready_file" redirect creates this file empty the instant the
+  # supervisor spawns the companion, long before the companion has loaded the
+  # trust roots, bound its sockets and self-queried. So an absent or still
+  # incomplete file means "not ready yet" (1) and has to be polled again; only a
+  # complete line whose contents disagree is a real mismatch (65). Reporting the
+  # empty file as 65 made the caller abort on its first poll, which is why
+  # enabling only ever succeeded when it happened to win the race.
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  [ "$(wc -l < "$file" | "$BB" tr -d ' ')" -eq 1 ] || return 65
+  [ "$(wc -l < "$file" | "$BB" tr -d ' ')" -eq 1 ] || return 1
   port=$(process_doh_port_for_slot "$slot") || return
-  IFS= read -r line < "$file" || return 65
+  IFS= read -r line < "$file" || return 1
   [ "$line" = "READY $transition $port" ] || return 65
 }
 
@@ -569,19 +576,25 @@ process_doh_spawn_supervisor() {
 
 process_doh_wait_ready() {
   [ "$#" -eq 4 ] || return 64
-  local role=$1 slot=$2 transition=$3 ready_file=$4 attempt=0 result attempts=${PROCESS_DOH_READY_ATTEMPTS:-100}
+  # Readiness legitimately includes loading every Android trust root, binding
+  # four sockets and a TLS handshake to the upstream, so the old five-second
+  # budget was too tight on a phone even once the poll stopped aborting early.
+  local role=$1 slot=$2 transition=$3 ready_file=$4 attempt=0 result attempts=${PROCESS_DOH_READY_ATTEMPTS:-300}
   decimal_uint_in_range "$attempts" 600 1 || return 65
   while [ "$attempt" -lt "$attempts" ]; do
     process_record_load "$role" 2>/dev/null || return 69
     process_identity_matches_loaded || return 69
-    if [ -e "$ready_file" ] || [ -L "$ready_file" ]; then
-      process_doh_ready_validate "$ready_file" "$slot" "$transition"
-      result=$?
-      [ "$result" -eq 0 ] || return "$result"
-      process_doh_child_identity_validate "$slot" "$transition" || return 69
-      rm -f "$ready_file"
-      return 0
-    fi
+    process_doh_ready_validate "$ready_file" "$slot" "$transition"
+    result=$?
+    case "$result" in
+      0)
+        process_doh_child_identity_validate "$slot" "$transition" || return 69
+        rm -f "$ready_file"
+        return 0
+        ;;
+      1) ;;
+      *) return "$result" ;;
+    esac
     attempt=$((attempt + 1))
     sleep 0.05
   done

@@ -2143,9 +2143,21 @@ firewall_app_policy_apply() {
 DOH_CHAIN4=JJD4_OUT
 DOH_CHAIN6=JJD6_OUT
 DOH_UID_EXEMPT=65534
+# Opportunistic Private DNS probes DoT on 853; redirecting it into the local
+# proxy makes the probe fail so the resolver falls back to plain 53, which the
+# rules below already capture. The module never mutates private_dns_mode.
+DOH_DOT_PORT=853
 DOH_MIN_APP_ID=10000
 DOH_MAX_APP_ID=19999
 DOH_MAX_UID=4294967294
+# Many Android kernels ship ip6tables without ip6table_nat, so there is nowhere
+# to redirect an IPv6 query to. Those kernels still have the filter table, where
+# the only honest action is to refuse the plaintext query: the resolver retries
+# over IPv4, which is redirected into the companion. Refusing is what stops a
+# plaintext IPv6 lookup from leaving the device -- letting it through would be a
+# silent bypass of the whole feature.
+DOH_REJECT_WITH4=icmp-port-unreachable
+DOH_REJECT_WITH6=icmp6-port-unreachable
 
 firewall_doh_dir() { printf '%s\n' "$RULE_RUNTIME/doh"; }
 firewall_doh_manifest() { printf '%s\n' "$RULE_RUNTIME/doh/firewall-$1.tsv"; }
@@ -2165,6 +2177,92 @@ firewall_doh_mode_valid() {
 
 firewall_doh_port_valid() {
   decimal_uint_in_range "$1" 65535 1 || return 65
+}
+
+# Every DoH record already carries its iptables table in field 3, but each
+# handler hardcoded "nat" and the validators asserted it, so the field was dead
+# weight. Routing every read and write through one resolver is what lets IPv6
+# move to the filter table on kernels without ip6table_nat.
+#
+# Reading a builtin chain is enough to tell the two apart: a kernel without
+# ip6table_nat answers "Table does not exist (do you need to insmod?)" and exits
+# non-zero, which is exactly how encrypted DNS failed in the field. If neither
+# table answers, stay on nat so the caller reports the missing-xtables failure it
+# already knows how to report instead of a confusing filter-table one.
+firewall_doh_ipv6_table_probe() {
+  if firewall_xt ipv6 nat -S OUTPUT >/dev/null 2>&1; then printf 'nat\n'; return 0; fi
+  if firewall_xt ipv6 filter -S OUTPUT >/dev/null 2>&1; then printf 'filter\n'; return 0; fi
+  printf 'nat\n'
+}
+
+# Resolved once per process and cached: this is consulted at ~50 call sites per
+# operation and each probe costs a process spawn. An inherited value is honoured
+# only when it names a table this code actually supports.
+firewall_doh_table_for() {
+  case "$1" in
+    ipv4) printf 'nat\n'; return 0 ;;
+    ipv6) ;;
+    *) return 65 ;;
+  esac
+  case "${DOH_IPV6_TABLE-}" in
+    nat|filter) ;;
+    *) DOH_IPV6_TABLE=$(firewall_doh_ipv6_table_probe) ;;
+  esac
+  export DOH_IPV6_TABLE
+  printf '%s\n' "$DOH_IPV6_TABLE"
+}
+
+# The action every DNS-carrying rule ends in. The nat table can hand the query to
+# the companion; the filter table can only refuse it.
+firewall_doh_action_for() {
+  local family=$1 port=$2 table
+  firewall_doh_port_valid "$port" || return 65
+  table=$(firewall_doh_table_for "$family") || return 65
+  case "$table:$family" in
+    nat:*) printf 'REDIRECT --to-ports %s\n' "$port" ;;
+    filter:ipv4) printf 'REJECT --reject-with %s\n' "$DOH_REJECT_WITH4" ;;
+    filter:ipv6) printf 'REJECT --reject-with %s\n' "$DOH_REJECT_WITH6" ;;
+    *) return 65 ;;
+  esac
+}
+
+# The four (protocol, port) pairs an owned DoH chain covers, in manifest order.
+# The writer and the record validator both read them from here so the rules that
+# get installed and the rules that get accepted can never drift apart -- and so
+# neither plaintext 53 nor opportunistic DoT on 853 can be dropped from one side
+# without failing the other.
+firewall_doh_rule_bodies() {
+  local family=$1 port=$2 prefix=$3 action
+  action=$(firewall_doh_action_for "$family" "$port") || return 65
+  printf '%s-p udp --dport 53 -j %s\n' "$prefix" "$action"
+  printf '%s-p tcp --dport 53 -j %s\n' "$prefix" "$action"
+  printf '%s-p tcp --dport %s -j %s\n' "$prefix" "$DOH_DOT_PORT" "$action"
+  printf '%s-p udp --dport %s -j %s\n' "$prefix" "$DOH_DOT_PORT" "$action"
+}
+
+# A manifest carries one base64 rule per field, so validation has to pin each
+# field to its own generated line. Comparing the joined text instead accepts a
+# rehashed record that packs two rules into one field and leaves another empty:
+# the same bytes overall, but a rule list the writer never emitted and the
+# installer cannot replay.
+firewall_doh_rule_line() {
+  printf '%s\n' "$1" | "$BB" awk -v n="$2" 'NR==n{print; exit}'
+}
+
+# The live-state scans have no record to read the table from, so they resolve it
+# the same way the writers do. Wrapping the two call shapes keeps that resolution
+# in one place instead of repeating it at ~46 call sites.
+firewall_doh_xt() {
+  local family=$1 table
+  shift
+  table=$(firewall_doh_table_for "$family") || return 65
+  firewall_xt "$family" "$table" "$@"
+}
+
+firewall_doh_chain_exists() {
+  local family=$1 chain=$2 table
+  table=$(firewall_doh_table_for "$family") || return 65
+  firewall_chain_exists "$family" "$table" "$chain"
 }
 
 firewall_doh_uid_valid() {
@@ -2249,37 +2347,43 @@ firewall_doh_selected_uid_file_nonempty() {
 }
 
 firewall_doh_rules_file() {
-  local family=$1 mode=$2 port=$3 uid_file=$4 output=$5 uid rule
+  local family=$1 mode=$2 port=$3 uid_file=$4 output=$5 uid rule plain result=0
   firewall_doh_mode_valid "$mode" || return
   firewall_doh_port_valid "$port" || return
   firewall_doh_uid_file_valid "$uid_file" || return
   : > "$output" || return 74
-  rule="-m owner --uid-owner $DOH_UID_EXEMPT -j RETURN"
-  firewall_rule_append "$output" "$rule" || return
+  plain="$output.plain"
+  rm -f "$plain"
+  printf -- '-m owner --uid-owner %s -j RETURN\n' "$DOH_UID_EXEMPT" > "$plain" || return 74
   if [ "$mode" = global ]; then
-    firewall_rule_append "$output" "-p udp --dport 53 -j REDIRECT --to-ports $port" || return
-    firewall_rule_append "$output" "-p tcp --dport 53 -j REDIRECT --to-ports $port" || return
-    return 0
+    firewall_doh_rule_bodies "$family" "$port" '' >> "$plain" || result=65
+  else
+    firewall_doh_selected_uid_file_nonempty "$uid_file" || result=65
+    while IFS= read -r uid || [ -n "$uid" ]; do
+      [ -n "$uid" ] || continue
+      firewall_doh_uid_valid "$uid" || { result=65; break; }
+      firewall_doh_rule_bodies "$family" "$port" "-m owner --uid-owner $uid " >> "$plain" || { result=65; break; }
+    done < "$uid_file"
   fi
-  firewall_doh_selected_uid_file_nonempty "$uid_file" || return
-  while IFS= read -r uid || [ -n "$uid" ]; do
-    [ -n "$uid" ] || continue
-    firewall_doh_uid_valid "$uid" || return
-    firewall_rule_append "$output" "-m owner --uid-owner $uid -p udp --dport 53 -j REDIRECT --to-ports $port" || return
-    firewall_rule_append "$output" "-m owner --uid-owner $uid -p tcp --dport 53 -j REDIRECT --to-ports $port" || return
-  done < "$uid_file"
+  [ "$result" -eq 0 ] || { rm -f "$plain"; return "$result"; }
+  while IFS= read -r rule || [ -n "$rule" ]; do
+    [ -n "$rule" ] || continue
+    firewall_rule_append "$output" "$rule" || { rm -f "$plain"; return 74; }
+  done < "$plain"
+  rm -f "$plain"
 }
 
 firewall_doh_slot_record() {
-  local family=$1 mode=$2 slot=$3 port=$4 token=$5 uid_file=$6 output=$7 chain dispatcher rules count encoded
+  local family=$1 mode=$2 slot=$3 port=$4 token=$5 uid_file=$6 output=$7 chain dispatcher rules count encoded table
   chain=$(firewall_doh_chain_for "$family" "$slot") || return
   dispatcher=$(firewall_doh_dispatcher_for "$family") || return
+  table=$(firewall_doh_table_for "$family") || return
   rules="$RULE_TMP/doh.$family.$slot.rules.$$"
   firewall_doh_rules_file "$family" "$mode" "$port" "$uid_file" "$rules" || { rm -f "$rules"; return $?; }
   count=$(wc -l < "$rules" | tr -d ' ') || { rm -f "$rules"; return 74; }
   {
-    printf 'doh-slot-v1\t%s\tnat\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
-      "$family" "$dispatcher" "$chain" "$mode" "$slot" "$port" "$token" "$count"
+    printf 'doh-slot-v1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+      "$family" "$table" "$dispatcher" "$chain" "$mode" "$slot" "$port" "$token" "$count"
     while IFS= read -r encoded || [ -n "$encoded" ]; do printf '\t%s' "$encoded"; done < "$rules"
     printf '\n'
   } >> "$output" || { rm -f "$rules"; return 74; }
@@ -2287,8 +2391,9 @@ firewall_doh_slot_record() {
 }
 
 firewall_doh_actual_slot_record() {
-  local family=$1 slot=$2 token=$3 output=$4 line chain dispatcher mode port predecessor count index encoded
+  local family=$1 slot=$2 token=$3 output=$4 line chain dispatcher mode port predecessor count index encoded table
   line=$(firewall_doh_active_slot_record_line "$family" "$slot") || return
+  table=$(firewall_doh_table_for "$family") || return
   chain=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $5}')
   dispatcher=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $4}')
   mode=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $6}')
@@ -2296,8 +2401,8 @@ firewall_doh_actual_slot_record() {
   predecessor=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $9}')
   count=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $10}')
   {
-    printf 'doh-old-slot-v1\t%s\tnat\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
-      "$family" "$dispatcher" "$chain" "$mode" "$slot" "$port" "$predecessor" "$token" "$count"
+    printf 'doh-old-slot-v1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+      "$family" "$table" "$dispatcher" "$chain" "$mode" "$slot" "$port" "$predecessor" "$token" "$count"
     index=1
     while [ "$index" -le "$count" ]; do
       encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' -v n=$((10 + index)) '{print $n}')
@@ -2309,14 +2414,15 @@ firewall_doh_actual_slot_record() {
 }
 
 firewall_doh_dispatch_record() {
-  local family=$1 old_slot=$2 new_slot=$3 token=$4 output=$5 dispatcher old_rule=- new_rule
+  local family=$1 old_slot=$2 new_slot=$3 token=$4 output=$5 dispatcher old_rule=- new_rule table
   dispatcher=$(firewall_doh_dispatcher_for "$family") || return
+  table=$(firewall_doh_table_for "$family") || return
   new_rule=$(firewall_b64 "-j $(firewall_doh_chain_for "$family" "$new_slot")") || return
   if [ "$old_slot" != - ]; then
     old_rule=$(firewall_b64 "-j $(firewall_doh_chain_for "$family" "$old_slot")") || return
   fi
-  printf 'doh-dispatch-v1\t%s\tnat\tOUTPUT\t%s\t%s\t%s\t%s\n' \
-    "$family" "$dispatcher" "$token" "$old_rule" "$new_rule" >> "$output" || return 74
+  printf 'doh-dispatch-v1\t%s\t%s\tOUTPUT\t%s\t%s\t%s\t%s\n' \
+    "$family" "$table" "$dispatcher" "$token" "$old_rule" "$new_rule" >> "$output" || return 74
 }
 
 firewall_doh_sha256_valid() {
@@ -2330,7 +2436,7 @@ firewall_doh_manifest_body_hash() {
 }
 
 firewall_doh_record_validate() {
-  local line=$1 fields schema family table dispatcher chain mode slot port token count expected index encoded rule uid predecessor slot_line
+  local line=$1 fields schema family table dispatcher chain mode slot port token count expected index encoded rule uid predecessor slot_line cursor
   fields=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print NF}') || return 65
   schema=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $1}')
   case "$schema" in
@@ -2345,7 +2451,7 @@ firewall_doh_record_validate() {
       port=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $8}')
       token=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $9}')
       count=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $10}')
-      [ "$table" = nat ] || return 65
+      [ "$table" = "$(firewall_doh_table_for "$family")" ] || return 65
       [ "$dispatcher" = "$(firewall_doh_dispatcher_for "$family")" ] || return 65
       [ "$chain" = "$(firewall_doh_chain_for "$family" "$slot")" ] || return 65
       firewall_doh_mode_valid "$mode" || return
@@ -2357,16 +2463,18 @@ firewall_doh_record_validate() {
       rule=$(firewall_unb64 "$encoded" 2>/dev/null) || return 65
       [ "$rule" = "-m owner --uid-owner $DOH_UID_EXEMPT -j RETURN" ] || return 65
       if [ "$mode" = global ]; then
-        [ "$count" -eq 3 ] || return 65
-        encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $12}')
-        rule=$(firewall_unb64 "$encoded" 2>/dev/null) || return 65
-        [ "$rule" = "-p udp --dport 53 -j REDIRECT --to-ports $port" ] || return 65
-        encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $13}')
-        rule=$(firewall_unb64 "$encoded" 2>/dev/null) || return 65
-        [ "$rule" = "-p tcp --dport 53 -j REDIRECT --to-ports $port" ] || return 65
+        [ "$count" -eq 5 ] || return 65
+        expected=$(firewall_doh_rule_bodies "$family" "$port" '') || return 65
+        cursor=2
+        while [ "$cursor" -le 5 ]; do
+          encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' -v n=$((10 + cursor)) '{print $n}')
+          rule=$(firewall_unb64 "$encoded" 2>/dev/null) || return 65
+          [ "$rule" = "$(firewall_doh_rule_line "$expected" $((cursor - 1)))" ] || return 65
+          cursor=$((cursor + 1))
+        done
       else
         [ "$count" -gt 1 ] || return 65
-        [ $(((count - 1) % 2)) -eq 0 ] || return 65
+        [ $(((count - 1) % 4)) -eq 0 ] || return 65
         index=2
         while [ "$index" -le "$count" ]; do
           encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' -v n=$((10 + index)) '{print $n}')
@@ -2375,12 +2483,15 @@ firewall_doh_record_validate() {
           [ "$uid" != "$rule" ] || return 65
           uid=${uid%% *}
           firewall_doh_uid_valid "$uid" || return 65
-          [ "$rule" = "-m owner --uid-owner $uid -p udp --dport 53 -j REDIRECT --to-ports $port" ] || return 65
-          index=$((index + 1))
-          encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' -v n=$((10 + index)) '{print $n}')
-          rule=$(firewall_unb64 "$encoded" 2>/dev/null) || return 65
-          [ "$rule" = "-m owner --uid-owner $uid -p tcp --dport 53 -j REDIRECT --to-ports $port" ] || return 65
-          index=$((index + 1))
+          expected=$(firewall_doh_rule_bodies "$family" "$port" "-m owner --uid-owner $uid ") || return 65
+          cursor=$index
+          while [ "$cursor" -le $((index + 3)) ]; do
+            encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' -v n=$((10 + cursor)) '{print $n}')
+            rule=$(firewall_unb64 "$encoded" 2>/dev/null) || return 65
+            [ "$rule" = "$(firewall_doh_rule_line "$expected" $((cursor - index + 1)))" ] || return 65
+            cursor=$((cursor + 1))
+          done
+          index=$((index + 4))
         done
       fi
       ;;
@@ -2396,7 +2507,7 @@ firewall_doh_record_validate() {
       predecessor=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $9}')
       token=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $10}')
       count=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $11}')
-      [ "$table" = nat ] || return 65
+      [ "$table" = "$(firewall_doh_table_for "$family")" ] || return 65
       [ "$dispatcher" = "$(firewall_doh_dispatcher_for "$family")" ] || return 65
       [ "$chain" = "$(firewall_doh_chain_for "$family" "$slot")" ] || return 65
       firewall_doh_mode_valid "$mode" || return
@@ -2405,8 +2516,8 @@ firewall_doh_record_validate() {
       firewall_doh_token_valid "$token" || return
       case "$count" in ''|*[!0-9]*) return 65 ;; esac
       [ "$fields" -eq $((11 + count)) ] || return 65
-      slot_line=$(printf 'doh-slot-v1\t%s\tnat\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
-        "$family" "$dispatcher" "$chain" "$mode" "$slot" "$port" "$predecessor" "$count")
+      slot_line=$(printf 'doh-slot-v1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+        "$family" "$table" "$dispatcher" "$chain" "$mode" "$slot" "$port" "$predecessor" "$count")
       index=1
       while [ "$index" -le "$count" ]; do
         encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' -v n=$((11 + index)) '{print $n}')
@@ -2421,7 +2532,7 @@ firewall_doh_record_validate() {
       table=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $3}')
       dispatcher=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $5}')
       token=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $6}')
-      [ "$table" = nat ] || return 65
+      [ "$table" = "$(firewall_doh_table_for "$family")" ] || return 65
       [ "$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $4}')" = OUTPUT ] || return 65
       [ "$dispatcher" = "$(firewall_doh_dispatcher_for "$family")" ] || return 65
       firewall_doh_token_valid "$token" || return
@@ -2568,7 +2679,7 @@ firewall_doh_output_jump_count() {
   jump=$(firewall_doh_output_jump "$family") || return
   expected="-A OUTPUT $jump"
   raw="$RULE_TMP/doh-output-count.$$.$family"
-  firewall_xt "$family" nat -S OUTPUT > "$raw" 2>/dev/null || return 76
+  firewall_doh_xt "$family" -S OUTPUT > "$raw" 2>/dev/null || return 76
   count=$("$BB" awk -v wanted="$expected" '$0==wanted{count++} END{print count+0}' "$raw") || { rm -f "$raw"; return 70; }
   rm -f "$raw"
   printf '%s\n' "$count"
@@ -2578,7 +2689,7 @@ firewall_doh_dispatcher_rule_count() {
   local family=$1 dispatcher raw count
   dispatcher=$(firewall_doh_dispatcher_for "$family") || return
   raw="$RULE_TMP/doh-dispatch-count.$$.$family"
-  firewall_xt "$family" nat -S "$dispatcher" > "$raw" 2>/dev/null || return 1
+  firewall_doh_xt "$family" -S "$dispatcher" > "$raw" 2>/dev/null || return 1
   count=$("$BB" awk -v chain="$dispatcher" '$0 != "-N " chain { count++ } END{print count+0}' "$raw") || { rm -f "$raw"; return 70; }
   rm -f "$raw"
   printf '%s\n' "$count"
@@ -2587,12 +2698,12 @@ firewall_doh_dispatcher_rule_count() {
 firewall_doh_dispatcher_current_slot() {
   local family=$1 dispatcher raw line chain slot count
   dispatcher=$(firewall_doh_dispatcher_for "$family") || return
-  if ! firewall_chain_exists "$family" nat "$dispatcher"; then
+  if ! firewall_doh_chain_exists "$family" "$dispatcher"; then
     printf -- '-\n'
     return 0
   fi
   raw="$RULE_TMP/doh-dispatch-current.$$.$family"
-  firewall_xt "$family" nat -S "$dispatcher" > "$raw" 2>/dev/null || return 76
+  firewall_doh_xt "$family" -S "$dispatcher" > "$raw" 2>/dev/null || return 76
   count=$("$BB" awk -v chain="$dispatcher" '$0 != "-N " chain { count++ } END{print count+0}' "$raw") || { rm -f "$raw"; return 70; }
   [ "$count" -le 1 ] || { rm -f "$raw"; return 76; }
   if [ "$count" -eq 0 ]; then
@@ -2620,7 +2731,7 @@ firewall_doh_stage_old_slot() {
   if [ "$slot" = - ]; then
     local dispatcher
     dispatcher=$(firewall_doh_dispatcher_for "$family") || return
-    firewall_chain_exists "$family" nat "$dispatcher" && return 76
+    firewall_doh_chain_exists "$family" "$dispatcher" && return 76
   fi
   if [ "$slot" = - ]; then
     [ "$count" -eq 0 ] || return 76
@@ -2666,7 +2777,7 @@ firewall_doh_chain_subset_indices() {
   esac
   raw="$RULE_TMP/doh-chain-raw.$$.$family"
   actual="$RULE_TMP/doh-chain-actual.$$.$family"
-  firewall_xt "$family" nat -S "$chain" > "$raw" 2>/dev/null || return 76
+  firewall_doh_xt "$family" -S "$chain" > "$raw" 2>/dev/null || return 76
   "$BB" awk -v chain="$chain" '$0 != "-N " chain { print }' "$raw" > "$actual" || { rm -f "$raw" "$actual"; return 74; }
   rm -f "$raw"
   lines=$(wc -l < "$actual" | tr -d ' ') || { rm -f "$actual"; return 74; }
@@ -2704,49 +2815,51 @@ firewall_doh_chain_matches_record() {
 firewall_doh_chain_empty() {
   local family=$1 chain=$2 raw count
   raw="$RULE_TMP/doh-empty.$$.$family"
-  firewall_xt "$family" nat -S "$chain" > "$raw" 2>/dev/null || return 76
+  firewall_doh_xt "$family" -S "$chain" > "$raw" 2>/dev/null || return 76
   count=$("$BB" awk -v chain="$chain" '$0 != "-N " chain { count++ } END{print count+0}' "$raw") || { rm -f "$raw"; return 70; }
   rm -f "$raw"
   [ "$count" -eq 0 ]
 }
 
 firewall_doh_apply_slot_record_locked() {
-  local line=$1 family chain count index encoded rule
+  local line=$1 family chain count index encoded rule table
   firewall_doh_record_validate "$line" || return 65
   family=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $2}')
+  table=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $3}')
   chain=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $5}')
   count=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $10}')
-  firewall_chain_exists "$family" nat "$chain" && return 76
-  firewall_xt "$family" nat -N "$chain" || return 74
+  firewall_chain_exists "$family" "$table" "$chain" && return 76
+  firewall_xt "$family" "$table" -N "$chain" || return 74
   index=1
   while [ "$index" -le "$count" ]; do
     encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' -v n=$((10 + index)) '{print $n}')
     rule=$(firewall_unb64 "$encoded") || return 65
     set -- $rule
-    firewall_xt "$family" nat -A "$chain" "$@" || return 74
+    firewall_xt "$family" "$table" -A "$chain" "$@" || return 74
     index=$((index + 1))
   done
   firewall_doh_chain_matches_record "$line" || return 76
 }
 
 firewall_doh_rebuild_old_slot_record_locked() {
-  local line=$1 family chain count index encoded rule
+  local line=$1 family chain count index encoded rule table
   firewall_doh_record_validate "$line" || return 65
   [ "$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $1}')" = doh-old-slot-v1 ] || return 65
   family=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $2}')
+  table=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $3}')
   chain=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $5}')
   count=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $11}')
-  if firewall_chain_exists "$family" nat "$chain"; then
+  if firewall_chain_exists "$family" "$table" "$chain"; then
     firewall_doh_chain_matches_record "$line" || return 76
     return 0
   fi
-  firewall_xt "$family" nat -N "$chain" || return 76
+  firewall_xt "$family" "$table" -N "$chain" || return 76
   index=1
   while [ "$index" -le "$count" ]; do
     encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' -v n=$((11 + index)) '{print $n}')
     rule=$(firewall_unb64 "$encoded") || return 65
     set -- $rule
-    firewall_xt "$family" nat -A "$chain" "$@" || return 76
+    firewall_xt "$family" "$table" -A "$chain" "$@" || return 76
     index=$((index + 1))
   done
   firewall_doh_chain_matches_record "$line" || return 76
@@ -2760,12 +2873,13 @@ firewall_doh_rebuild_old_slots_from_manifest() {
 }
 
 firewall_doh_remove_slot_record_locked() {
-  local line=$1 schema family chain count offset indices index reverse= encoded rule
+  local line=$1 schema family chain count offset indices index reverse= encoded rule table
   firewall_doh_record_validate "$line" || return 65
   schema=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $1}')
   family=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $2}')
+  table=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $3}')
   chain=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $5}')
-  if ! firewall_chain_exists "$family" nat "$chain"; then return 0; fi
+  if ! firewall_chain_exists "$family" "$table" "$chain"; then return 0; fi
   case "$schema" in
     doh-slot-v1) count=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $10}'); offset=10 ;;
     doh-old-slot-v1) count=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $11}'); offset=11 ;;
@@ -2777,10 +2891,10 @@ firewall_doh_remove_slot_record_locked() {
     encoded=$(printf '%s\n' "$line" | "$BB" awk -F '\t' -v n=$((offset + index)) '{print $n}')
     rule=$(firewall_unb64 "$encoded") || return 65
     set -- $rule
-    firewall_xt "$family" nat -D "$chain" "$@" || return 76
+    firewall_xt "$family" "$table" -D "$chain" "$@" || return 76
   done
   firewall_doh_chain_empty "$family" "$chain" || return 76
-  firewall_xt "$family" nat -X "$chain" || return 76
+  firewall_xt "$family" "$table" -X "$chain" || return 76
 }
 
 firewall_doh_cleanup_new_slots_from_body() {
@@ -2793,14 +2907,18 @@ firewall_doh_cleanup_new_slots_from_body() {
 }
 
 firewall_doh_probe_family_locked() {
-  local family=$1 chain=$2 actual filtered result=0 count line rule index
-  firewall_chain_exists "$family" nat "$chain" && return 76
-  firewall_xt "$family" nat -N "$chain" || return 69
-  firewall_xt "$family" nat -A "$chain" -m owner --uid-owner "$DOH_UID_EXEMPT" -j RETURN || result=69
-  [ "$result" -ne 0 ] || firewall_xt "$family" nat -A "$chain" -p udp --dport 53 -j REDIRECT --to-ports 1053 || result=69
-  [ "$result" -ne 0 ] || firewall_xt "$family" nat -A "$chain" -p tcp --dport 53 -j REDIRECT --to-ports 1053 || result=69
+  local family=$1 chain=$2 actual filtered result=0 count line rule index action
+  # Probe the action this family will actually install. Probing REDIRECT on a
+  # filter-table family would fail for the wrong reason and report the kernel as
+  # incapable when it can enforce encrypted DNS perfectly well.
+  action=$(firewall_doh_action_for "$family" 1053) || return 69
+  firewall_doh_chain_exists "$family" "$chain" && return 76
+  firewall_doh_xt "$family" -N "$chain" || return 69
+  firewall_doh_xt "$family" -A "$chain" -m owner --uid-owner "$DOH_UID_EXEMPT" -j RETURN || result=69
+  [ "$result" -ne 0 ] || firewall_doh_xt "$family" -A "$chain" -p udp --dport 53 -j $action || result=69
+  [ "$result" -ne 0 ] || firewall_doh_xt "$family" -A "$chain" -p tcp --dport 53 -j $action || result=69
   if [ "$result" -eq 0 ]; then
-    actual=$(firewall_xt "$family" nat -S "$chain" 2>/dev/null) || result=69
+    actual=$(firewall_doh_xt "$family" -S "$chain" 2>/dev/null) || result=69
     [ "$result" -ne 0 ] || filtered=$(printf '%s\n' "$actual" | "$BB" awk -v chain="$chain" '$0 != "-N " chain { print }') || result=69
     if [ "$result" -eq 0 ]; then
       count=$(printf '%s\n' "$filtered" | "$BB" awk 'NF{count++} END{print count+0}') || result=69
@@ -2812,23 +2930,23 @@ firewall_doh_probe_family_locked() {
         line=$(printf '%s\n' "$filtered" | sed -n "${index}p")
         case "$index" in
           1) rule="-m owner --uid-owner $DOH_UID_EXEMPT -j RETURN" ;;
-          2) rule="-p udp --dport 53 -j REDIRECT --to-ports 1053" ;;
-          3) rule="-p tcp --dport 53 -j REDIRECT --to-ports 1053" ;;
+          2) rule="-p udp --dport 53 -j $action" ;;
+          3) rule="-p tcp --dport 53 -j $action" ;;
         esac
         firewall_rendered_rule_matches "$chain" "$rule" "$line" || { result=69; break; }
         index=$((index + 1))
       done
     fi
   fi
-  firewall_xt "$family" nat -D "$chain" -p tcp --dport 53 -j REDIRECT --to-ports 1053 >/dev/null 2>&1 || true
-  firewall_xt "$family" nat -D "$chain" -p udp --dport 53 -j REDIRECT --to-ports 1053 >/dev/null 2>&1 || true
-  firewall_xt "$family" nat -D "$chain" -m owner --uid-owner "$DOH_UID_EXEMPT" -j RETURN >/dev/null 2>&1 || true
-  firewall_xt "$family" nat -X "$chain" >/dev/null 2>&1 || return 76
+  firewall_doh_xt "$family" -D "$chain" -p tcp --dport 53 -j $action >/dev/null 2>&1 || true
+  firewall_doh_xt "$family" -D "$chain" -p udp --dport 53 -j $action >/dev/null 2>&1 || true
+  firewall_doh_xt "$family" -D "$chain" -m owner --uid-owner "$DOH_UID_EXEMPT" -j RETURN >/dev/null 2>&1 || true
+  firewall_doh_xt "$family" -X "$chain" >/dev/null 2>&1 || return 76
   return "$result"
 }
 
 firewall_doh_capability_locked() {
-  local chain4="JJ_DOH_CAP4_$$" chain6="JJ_DOH_CAP6_$$" result4 result6 reason
+  local chain4="JJ_DOH_CAP4_$$" chain6="JJ_DOH_CAP6_$$" result4 result6 reason table6
   firewall_doh_probe_family_locked ipv4 "$chain4"; result4=$?
   case "$result4" in
     0) ;;
@@ -2838,13 +2956,16 @@ firewall_doh_capability_locked() {
       ;;
     *) printf 'unsupported probe_cleanup_failed\n'; return 0 ;;
   esac
+  table6=$(firewall_doh_table_for ipv6) || table6=nat
   firewall_doh_probe_family_locked ipv6 "$chain6"; result6=$?
   case "$result6" in
     0) printf 'supported -\n' ;;
     69)
-      reason=ipv6_probe_failed
+      # A filter-table IPv6 that cannot even refuse is a different failure from a
+      # nat-table IPv6 that cannot redirect, and the user needs to be told which.
+      if [ "$table6" = filter ]; then reason=ipv6_reject_unavailable; else reason=ipv6_probe_failed; fi
       if [ -n "${XT_FAIL_OWNER-}" ]; then reason=owner_match_unavailable; fi
-      if [ -n "${XT_FAIL_REDIRECT-}" ]; then reason=redirect_unavailable; fi
+      if [ -n "${XT_FAIL_REDIRECT-}" ] && [ "$table6" = nat ]; then reason=redirect_unavailable; fi
       printf 'unsupported %s\n' "$reason"
       ;;
     *) printf 'unsupported probe_cleanup_failed\n' ;;
@@ -2852,17 +2973,22 @@ firewall_doh_capability_locked() {
 }
 
 firewall_doh_capability_json() {
-  local capability state reason result
+  local capability state reason result table6 ipv6_mode
   rules_init_paths "$MODDIR" || return
   rules_lock_acquire firewall || return
   capability=$(firewall_doh_capability_locked)
   result=$?
+  table6=$(firewall_doh_table_for ipv6) || table6=nat
   rules_lock_release firewall || return
   [ "$result" -eq 0 ] || return "$result"
   state=${capability%% *}
   reason=${capability#* }
   if [ "$state" = supported ]; then
-    printf '{"supported":true,"reason":null,"families":["ipv4","ipv6"],"modes":["global","selected"]}\n'
+    # "blocked" is not a lesser form of support: plaintext IPv6 DNS is refused so
+    # the resolver falls back to the IPv4 path, which is encrypted. The UI needs
+    # the distinction to explain what the kernel is actually doing.
+    [ "$table6" = filter ] && ipv6_mode=blocked || ipv6_mode=encrypted
+    printf '{"supported":true,"reason":null,"families":["ipv4","ipv6"],"modes":["global","selected"],"ipv6Mode":"%s"}\n' "$ipv6_mode"
   else
     printf '{"supported":false,"reason":"%s","families":[],"modes":[]}\n' "$reason"
   fi
@@ -2949,15 +3075,15 @@ firewall_doh_ensure_output_jump() {
   [ "$count" -eq 1 ] && return 0
   jump=$(firewall_doh_output_jump "$family") || return
   set -- $jump
-  firewall_xt "$family" nat -I OUTPUT 1 "$@" || return 76
+  firewall_doh_xt "$family" -I OUTPUT 1 "$@" || return 76
 }
 
 firewall_doh_remove_output_jumps() {
   local family=$1 count jump
   jump=$(firewall_doh_output_jump "$family") || return
   set -- $jump
-  while firewall_xt "$family" nat -C OUTPUT "$@" >/dev/null 2>&1; do
-    firewall_xt "$family" nat -D OUTPUT "$@" || return 76
+  while firewall_doh_xt "$family" -C OUTPUT "$@" >/dev/null 2>&1; do
+    firewall_doh_xt "$family" -D OUTPUT "$@" || return 76
   done
   count=$(firewall_doh_output_jump_count "$family") || return
   [ "$count" -eq 0 ] || return 76
@@ -2967,8 +3093,8 @@ firewall_doh_switch_family() {
   local family=$1 old_slot=$2 new_slot=$3 dispatcher old_chain new_chain current count
   dispatcher=$(firewall_doh_dispatcher_for "$family") || return
   new_chain=$(firewall_doh_chain_for "$family" "$new_slot") || return
-  if ! firewall_chain_exists "$family" nat "$dispatcher"; then
-    firewall_xt "$family" nat -N "$dispatcher" || return 76
+  if ! firewall_doh_chain_exists "$family" "$dispatcher"; then
+    firewall_doh_xt "$family" -N "$dispatcher" || return 76
     case "$family" in
       ipv4) DOH_SWITCH_CREATED4=1 ;;
       ipv6) DOH_SWITCH_CREATED6=1 ;;
@@ -2985,10 +3111,10 @@ firewall_doh_switch_family() {
     return
   fi
   if [ "$current" = - ]; then
-    firewall_xt "$family" nat -A "$dispatcher" -j "$new_chain" || return 76
+    firewall_doh_xt "$family" -A "$dispatcher" -j "$new_chain" || return 76
   else
     [ "$old_slot" = - ] || [ "$current" = "$old_slot" ] || return 76
-    firewall_xt "$family" nat -R "$dispatcher" 1 -j "$new_chain" || return 76
+    firewall_doh_xt "$family" -R "$dispatcher" 1 -j "$new_chain" || return 76
   fi
   firewall_doh_ensure_output_jump "$family" || return
 }
@@ -2997,24 +3123,24 @@ firewall_doh_restore_family() {
   local family=$1 old_slot=$2 new_slot=$3 created=${4:-1} dispatcher old_chain new_chain current
   dispatcher=$(firewall_doh_dispatcher_for "$family") || return
   new_chain=$(firewall_doh_chain_for "$family" "$new_slot") || return
-  firewall_chain_exists "$family" nat "$dispatcher" || return 0
+  firewall_doh_chain_exists "$family" "$dispatcher" || return 0
   current=$(firewall_doh_dispatcher_current_slot "$family") || return
   if [ "$old_slot" = - ] && [ "$current" = - ]; then
     [ "$created" -eq 1 ] || return 0
     firewall_doh_remove_output_jumps "$family" || return
     firewall_doh_chain_empty "$family" "$dispatcher" || return 76
-    firewall_xt "$family" nat -X "$dispatcher" || return 76
+    firewall_doh_xt "$family" -X "$dispatcher" || return 76
     return 0
   fi
   [ "$current" = "$new_slot" ] || return 0
   if [ "$old_slot" = - ]; then
     firewall_doh_remove_output_jumps "$family" || return
-    firewall_xt "$family" nat -D "$dispatcher" -j "$new_chain" >/dev/null 2>&1 || true
+    firewall_doh_xt "$family" -D "$dispatcher" -j "$new_chain" >/dev/null 2>&1 || true
     firewall_doh_chain_empty "$family" "$dispatcher" || return 76
-    firewall_xt "$family" nat -X "$dispatcher" || return 76
+    firewall_doh_xt "$family" -X "$dispatcher" || return 76
   else
     old_chain=$(firewall_doh_chain_for "$family" "$old_slot") || return
-    firewall_xt "$family" nat -R "$dispatcher" 1 -j "$old_chain" || return 76
+    firewall_doh_xt "$family" -R "$dispatcher" 1 -j "$old_chain" || return 76
   fi
 }
 
@@ -3173,14 +3299,14 @@ firewall_doh_remove_dispatcher() {
   local family=$1 dispatcher current chain
   dispatcher=$(firewall_doh_dispatcher_for "$family") || return
   firewall_doh_remove_output_jumps "$family" || return
-  firewall_chain_exists "$family" nat "$dispatcher" || return 0
+  firewall_doh_chain_exists "$family" "$dispatcher" || return 0
   current=$(firewall_doh_dispatcher_current_slot "$family") || return
   if [ "$current" != - ]; then
     chain=$(firewall_doh_chain_for "$family" "$current") || return
-    firewall_xt "$family" nat -D "$dispatcher" -j "$chain" || return 76
+    firewall_doh_xt "$family" -D "$dispatcher" -j "$chain" || return 76
   fi
   firewall_doh_chain_empty "$family" "$dispatcher" || return 76
-  firewall_xt "$family" nat -X "$dispatcher" || return 76
+  firewall_doh_xt "$family" -X "$dispatcher" || return 76
   case "$family" in
     ipv4) DOH_REMOVE_TOUCHED4=1 ;;
     ipv6) DOH_REMOVE_TOUCHED6=1 ;;
@@ -3199,9 +3325,9 @@ firewall_doh_restore_active_family() {
   dispatcher=$(firewall_doh_dispatcher_for "$family") || return
   slot=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $7}') || return
   chain=$(firewall_doh_chain_for "$family" "$slot") || return
-  if ! firewall_chain_exists "$family" nat "$dispatcher"; then
+  if ! firewall_doh_chain_exists "$family" "$dispatcher"; then
     [ "$touched" -eq 1 ] || return 76
-    firewall_xt "$family" nat -N "$dispatcher" || return 76
+    firewall_doh_xt "$family" -N "$dispatcher" || return 76
     current=-
   else
     current=$(firewall_doh_dispatcher_current_slot "$family") || return
@@ -3211,7 +3337,7 @@ firewall_doh_restore_active_family() {
       [ "$touched" -eq 1 ] || return 76
       count=$(firewall_doh_dispatcher_rule_count "$family" "$dispatcher") || return 76
       [ "$count" -eq 0 ] || return 76
-      firewall_xt "$family" nat -A "$dispatcher" -j "$chain" || return 76
+      firewall_doh_xt "$family" -A "$dispatcher" -j "$chain" || return 76
       ;;
     "$slot") ;;
     *) return 76 ;;
@@ -3225,7 +3351,7 @@ firewall_doh_dispatchers_absent() {
     count=$(firewall_doh_output_jump_count "$family") || return
     [ "$count" -eq 0 ] || return 76
     dispatcher=$(firewall_doh_dispatcher_for "$family") || return
-    firewall_chain_exists "$family" nat "$dispatcher" && return 76
+    firewall_doh_chain_exists "$family" "$dispatcher" && return 76
   done
   return 0
 }
@@ -3238,7 +3364,7 @@ firewall_doh_remove_owned_recovery_locked() {
       doh-slot-v1*|doh-old-slot-v1*)
         family=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $2}')
         chain=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $5}')
-        if firewall_chain_exists "$family" nat "$chain"; then
+        if firewall_doh_chain_exists "$family" "$chain"; then
           firewall_doh_chain_subset_indices "$line" >/dev/null || { result=$?; break; }
         fi
         ;;
@@ -3282,7 +3408,7 @@ firewall_doh_preflight_detach_family() {
     *) return 64 ;;
   esac
   dispatcher=$(firewall_doh_dispatcher_for "$family") || return
-  if ! firewall_chain_exists "$family" nat "$dispatcher"; then
+  if ! firewall_doh_chain_exists "$family" "$dispatcher"; then
     [ "$count" -eq 0 ] || return 76
     return 0
   fi
@@ -3310,7 +3436,7 @@ firewall_doh_preflight_manifest_chains() {
       doh-slot-v1*|doh-old-slot-v1*)
         family=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $2}')
         chain=$(printf '%s\n' "$line" | "$BB" awk -F '\t' '{print $5}')
-        if firewall_chain_exists "$family" nat "$chain"; then
+        if firewall_doh_chain_exists "$family" "$chain"; then
           firewall_doh_chain_subset_indices "$line" >/dev/null || return 76
         fi
         ;;
@@ -3377,7 +3503,7 @@ firewall_doh_detach_dispatcher_locked() {
     case "$family" in ipv4) DOH_DETACH_TOUCHED4=1 ;; ipv6) DOH_DETACH_TOUCHED6=1 ;; esac
     firewall_doh_remove_output_jumps "$family" || return
   fi
-  firewall_chain_exists "$family" nat "$dispatcher" || return 0
+  firewall_doh_chain_exists "$family" "$dispatcher" || return 0
   case "$family" in ipv4) expected_slot=$DOH_NEW4 ;; ipv6) expected_slot=$DOH_NEW6 ;; *) return 64 ;; esac
   current=$(firewall_doh_dispatcher_current_slot "$family") || return
   if [ "$current" = - ]; then
@@ -3389,7 +3515,7 @@ firewall_doh_detach_dispatcher_locked() {
   [ "$current" = "$expected_slot" ] || return 76
   chain=$(firewall_doh_chain_for "$family" "$current") || return
   case "$family" in ipv4) DOH_DETACH_TOUCHED4=1 ;; ipv6) DOH_DETACH_TOUCHED6=1 ;; esac
-  firewall_xt "$family" nat -D "$dispatcher" -j "$chain" || return 76
+  firewall_doh_xt "$family" -D "$dispatcher" -j "$chain" || return 76
   count=$(firewall_doh_dispatcher_rule_count "$family" "$dispatcher") || return 76
   [ "$count" -eq 0 ] || return 76
   firewall_doh_chain_empty "$family" "$dispatcher" || return 76
@@ -3448,7 +3574,7 @@ firewall_doh_cleanup_owned_locked() {
     count=$(firewall_doh_output_jump_count "$family") || return
     [ "$count" -eq 0 ] || return 76
     dispatcher=$(firewall_doh_dispatcher_for "$family") || return
-    if firewall_chain_exists "$family" nat "$dispatcher"; then
+    if firewall_doh_chain_exists "$family" "$dispatcher"; then
       count=$(firewall_doh_dispatcher_rule_count "$family" "$dispatcher") || return 76
       [ "$count" -eq 0 ] || return 76
       firewall_doh_chain_empty "$family" "$dispatcher" || return 76
@@ -3461,8 +3587,8 @@ firewall_doh_cleanup_owned_locked() {
   [ "$result" -eq 0 ] || return "$result"
   for family in ipv4 ipv6; do
     dispatcher=$(firewall_doh_dispatcher_for "$family") || return
-    firewall_chain_exists "$family" nat "$dispatcher" || continue
-    firewall_xt "$family" nat -X "$dispatcher" || return 76
+    firewall_doh_chain_exists "$family" "$dispatcher" || continue
+    firewall_doh_xt "$family" -X "$dispatcher" || return 76
   done
   rm -f "$manifest" || return 74
 }
@@ -3481,10 +3607,10 @@ firewall_doh_known_chains_absent() {
   local family slot chain
   for family in ipv4 ipv6; do
     chain=$(firewall_doh_dispatcher_for "$family") || return
-    firewall_chain_exists "$family" nat "$chain" && return 76
+    firewall_doh_chain_exists "$family" "$chain" && return 76
     for slot in A B; do
       chain=$(firewall_doh_chain_for "$family" "$slot") || return
-      firewall_chain_exists "$family" nat "$chain" && return 76
+      firewall_doh_chain_exists "$family" "$chain" && return 76
     done
   done
   return 0

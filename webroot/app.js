@@ -51,12 +51,19 @@ const HISTORY_ERRORS = {
 };
 
 const DOH_ERRORS = {
-  private_dns_active: 'Android Private DNS 必须关闭后才能启用加密 DNS',
-  proxy_exited: '代理进程已退出',
-  companion_missing: '加密 DNS 组件不可用',
-  firewall_install_failed: '加密 DNS 规则安装失败',
-  endpoint_probe_failed: 'DoH URL 检测未通过',
-  unsupported_selected: '当前设备不支持所选应用模式',
+  invalid_endpoint: 'DoH URL 无效，请检查地址格式',
+  invalid_config: '加密 DNS 配置无效',
+  package_state_invalid: '应用包状态无效，请重新选择应用',
+  test_failed: 'DoH URL 检测未通过，该地址当前不可用',
+  commit_failed: '加密 DNS 配置保存失败',
+  recovery_failed: '加密 DNS 恢复失败',
+  runtime_failed: '加密 DNS 运行失败',
+  bootstrap_unresolved: '无法解析 DoH 服务器域名，请确认当前网络可以正常解析域名后重试',
+  firewall_unsupported: '当前内核缺少加密 DNS 转发所需的防火墙能力（owner 匹配或 DNS 重定向），普通 hosts 保护不受影响',
+  private_dns_active: '系统“私人 DNS”指定了主机名，请先改为“自动”或“关闭”，再启用加密 DNS',
+  companion_unavailable: '加密 DNS 组件不可用，请检查网络后重试',
+  upstream_unavailable: 'DoH 上游不可用，已回退到系统 DNS',
+  companion_exited: '加密 DNS 组件已退出，已回退到系统 DNS',
 };
 
 const VERB_LABELS = {
@@ -80,6 +87,7 @@ const VERB_LABELS = {
   'clear-cache': '清理缓存',
   'set-notice': '保存提示偏好',
   'set-app-policy': '保存应用策略',
+  'test-doh': '检测 DoH URL',
   'set-doh': '启用加密 DNS',
   'disable-doh': '关闭加密 DNS',
 };
@@ -524,6 +532,7 @@ function formatBytes(value) {
 function errorMessage(value, fallback = '') {
   const code = typeof value === 'string' ? value : value?.code;
   if (HISTORY_ERRORS[code]) return HISTORY_ERRORS[code];
+  if (DOH_ERRORS[code]) return DOH_ERRORS[code];
   if (typeof value === 'string') return value;
   if (value && typeof value === 'object' && typeof value.message === 'string') return value.message;
   return fallback;
@@ -1393,10 +1402,22 @@ function optimisticMutationStatus(verb, args) {
   return optimistic;
 }
 
+// 加密 DNS 与应用联网策略都不改规则来源，所以不能拿 sourcesOutOfSync 判定它们失败，
+// 否则来源恰好不同步时一次成功的应用也会被报成失败（clear-cache 早先已单独豁免过）。
+const SOURCE_NEUTRAL_VERBS = new Set(['set-doh', 'disable-doh', 'set-app-policy']);
+
 function showMutationResult(verb, status) {
   const label = VERB_LABELS[verb] || '操作';
-  if (status.result === 'critical' || status.result === 'failed' || status.sourcesOutOfSync) {
-    showNotice(`${label}未完成，当前规则保持不变`, { persistent: true, tone: 'danger' });
+  const sourceNeutral = SOURCE_NEUTRAL_VERBS.has(verb);
+  const failed = status.result === 'critical' || status.result === 'failed'
+    || (!sourceNeutral && status.sourcesOutOfSync);
+  if (failed) {
+    // 失败时把后台给出的具体原因带出来，否则用户只看到“未完成”，无从下手。
+    const reason = sourceNeutral ? errorMessage(status.lastError, '') : '';
+    showNotice(
+      reason ? `${label}未完成：${reason}` : `${label}未完成，当前规则保持不变`,
+      { persistent: true, tone: 'danger' },
+    );
   } else if (status.result === 'degraded') {
     showNotice(`${label}完成，部分来源使用缓存`, { tone: 'warning' });
   } else {
@@ -1416,10 +1437,13 @@ function dohErrorMessage(value, fallback = '加密 DNS 状态异常') {
   return fallback;
 }
 
+// 运行态取值必须与 lib/rules/doh.sh 的 doh_runtime_write 保持一致：
+// companionState 为 stopped|starting|running，firewallState 为 absent|staged|active|incomplete。
+// 只有伴随进程在跑且规则已切换完成，才算真正生效。
 function dohVerifiedActive(status = dohStatus) {
-  const companionOk = ['running', 'ready', 'verified'].includes(status?.companionState);
-  const firewallOk = ['installed', 'verified'].includes(status?.firewallState);
-  return ['global', 'selected'].includes(status?.effectiveMode) && companionOk && firewallOk;
+  return ['global', 'selected'].includes(status?.effectiveMode)
+    && status?.companionState === 'running'
+    && status?.firewallState === 'active';
 }
 
 function selectedDohSupported(status = dohStatus) {
@@ -1689,16 +1713,13 @@ async function testDohEndpoint() {
     showNotice(endpoint.error, { persistent: true, tone: 'danger' });
     return;
   }
-  elements.dohTest.disabled = true;
+  // 检测会真的下发一次后台操作（首次还要下载伴随组件），必须等它跑完并以它的
+  // 结论为准；交给 runMutation 复用统一的进度条与轮询，结果在 test-doh 分支落地。
   elements.dohTestResult.textContent = '正在检测…';
-  try {
-    const result = await execApi('test-doh', [encodeBase64Utf8(endpoint.value)]);
-    const rtt = Number.isFinite(result?.rttMs) ? ` · ${formatCount(result.rttMs)} ms` : '';
-    elements.dohTestResult.textContent = `检测通过${rtt}`;
-  } catch (error) {
-    if (!isAbort(error)) elements.dohTestResult.textContent = error?.message || '检测失败';
-  } finally {
-    syncDohControls();
+  const outcome = await runMutation('test-doh', [encodeBase64Utf8(endpoint.value)]);
+  if (elements.dohTestResult.textContent === '正在检测…') {
+    // 没走到 runMutation 的结果分支（后台忙、页面隐藏或已中止），别把占位文案留在界面上。
+    elements.dohTestResult.textContent = outcome?.errorCode ? '检测未开始，后台有其他操作正在执行' : '';
   }
 }
 
@@ -1939,6 +1960,16 @@ async function runMutation(verb, args = []) {
           historyLoaded = false;
           await loadHistory({ reset: true });
         }
+      }
+    } else if (verb === 'test-doh') {
+      // 检测只探测 URL，不改任何规则，所以只看这次操作自己的结论。
+      if (finalStatus.result === 'failed' || finalStatus.result === 'critical') {
+        const reason = dohErrorMessage(finalStatus.lastError, '该地址当前不可用');
+        elements.dohTestResult.textContent = `检测未通过：${reason}`;
+        showNotice(`${mutationLabel}未通过：${reason}`, { persistent: true, tone: 'danger' });
+      } else {
+        elements.dohTestResult.textContent = '检测通过';
+        showNotice(`${mutationLabel}通过`, { tone: 'success' });
       }
     } else if (verb === 'clear-cache') {
       // 清理缓存不动规则，所以这里不看 sourcesOutOfSync，只看这次操作自己的结果。
