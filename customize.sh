@@ -41,7 +41,7 @@ fi
 /system/bin/sh "$MODDIR/update.sh" || true
 
 if command -v ui_print >/dev/null 2>&1; then
-  ui_print "- 净界 · HOSTS 规则引擎"
+  ui_print "- 净界 · 引擎"
   ui_print "- 作者：相貌平平韩老魔"
   ui_print "- 请从官方链接下载，以防恶意脚本"
   ui_print "- 为保障网络环境安全，本工具仅支持过滤非法骚扰、恶意代码等违规信息。请正确合理使用工具功能，勿将合法商业广告纳入屏蔽范围。"

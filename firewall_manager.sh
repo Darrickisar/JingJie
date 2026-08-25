@@ -3492,6 +3492,27 @@ firewall_doh_remove_owned() {
   return "$result"
 }
 
+# 新增：强制清理所有 DoH 防火墙资源
+firewall_doh_force_cleanup() {
+  local family chain result=0
+
+  for family in ipv4 ipv6; do
+    # 1. 强制移除 OUTPUT 跳转（可能有多条）
+    while firewall_doh_output_jump_count "$family" 2>/dev/null | grep -q "^[1-9]"; do
+      firewall_doh_remove_output_jumps "$family" 2>/dev/null || break
+    done
+
+    # 2. 清空并删除 dispatcher 链
+    chain=$(firewall_doh_dispatcher_for "$family" 2>/dev/null) || continue
+    if firewall_doh_chain_exists "$family" "$chain" 2>/dev/null; then
+      firewall_doh_xt "$family" -F "$chain" 2>/dev/null || true
+      firewall_doh_xt "$family" -X "$chain" 2>/dev/null || true
+    fi
+  done
+
+  return 0
+}
+
 # Detach only the module-owned OUTPUT -> dispatcher routing. Slot and
 # dispatcher chains remain intact until the companion processes have stopped.
 firewall_doh_detach_dispatcher_locked() {
@@ -3533,6 +3554,19 @@ firewall_doh_detach_owned_locked() {
   firewall_doh_preflight_detach_family "$manifest" ipv4 || return
   firewall_doh_preflight_detach_family "$manifest" ipv6 || return
   firewall_doh_preflight_manifest_chains "$manifest" || return
+
+  # 修复 1: 幂等性检查 - 如果已经 detach 完成，直接返回成功
+  local ipv4_count ipv6_count
+  ipv4_count=$(firewall_doh_output_jump_count ipv4 2>/dev/null || printf 0)
+  ipv6_count=$(firewall_doh_output_jump_count ipv6 2>/dev/null || printf 0)
+  if [ "$ipv4_count" -eq 0 ] && [ "$ipv6_count" -eq 0 ]; then
+    # OUTPUT 链已清理，检查 dispatcher 链
+    local disp4 disp6 empty=1
+    disp4=$(firewall_doh_dispatcher_for ipv4 2>/dev/null) && firewall_doh_chain_exists ipv4 "$disp4" 2>/dev/null && ! firewall_doh_chain_empty ipv4 "$disp4" 2>/dev/null && empty=0
+    disp6=$(firewall_doh_dispatcher_for ipv6 2>/dev/null) && firewall_doh_chain_exists ipv6 "$disp6" 2>/dev/null && ! firewall_doh_chain_empty ipv6 "$disp6" 2>/dev/null && empty=0
+    [ "$empty" -eq 1 ] && return 0
+  fi
+
   firewall_doh_detach_dispatcher_locked "$manifest" ipv4 || {
     result=$?
     if [ "$DOH_DETACH_TOUCHED4" -eq 1 ]; then
@@ -3762,6 +3796,7 @@ firewall_dispatch() {
     doh-remove-owned:2) firewall_doh_remove_owned "$2" ;;
     doh-detach-owned:2) firewall_doh_detach_owned "$2" ;;
     doh-cleanup-owned:2) firewall_doh_cleanup_owned "$2" ;;
+    doh-force-cleanup:1) rules_lock_acquire firewall && firewall_doh_force_cleanup; result=$?; rules_lock_release firewall; return "$result" ;;
     doh-cleanup-recovery:1) firewall_doh_cleanup_recovery ;;
     *) return 64 ;;
   esac

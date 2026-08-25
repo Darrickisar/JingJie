@@ -610,6 +610,66 @@ doh_manager_test() {
   return "$result"
 }
 
+# 新增：强制关闭模式，用于正常关闭失败后的降级处理
+doh_manager_force_disable_runtime() {
+  local result=0
+
+  # 1. 强制停止进程（忽略错误）
+  process_stop_doh a 2>/dev/null || true
+  process_stop_doh b 2>/dev/null || true
+
+  # 2. 强制 kill 残留进程
+  pkill -9 jingjie_doh_proxy 2>/dev/null || true
+
+  # 3. 强制清理防火墙规则
+  sh "$MODDIR/firewall_manager.sh" doh-force-cleanup 2>/dev/null || true
+
+  # 4. 删除所有 DoH 清单文件
+  rm -f "$DOH_RUNTIME_DIR/"firewall-*.tsv 2>/dev/null || true
+
+  # 5. 提交 disabled 状态
+  doh_commit_disabled || result=$?
+
+  return "$result"
+}
+
+# 新增：增强的 disable_runtime，支持重试和降级
+doh_manager_disable_runtime_enhanced() {
+  [ "$#" -le 1 ] || return 64
+  local token result=0
+
+  if [ "$#" -eq 1 ]; then
+    token=$1
+  else
+    token=$(doh_prop_value "$DOH_CONFIG_STATE" transition_token 2>/dev/null || printf null)
+  fi
+
+  # 验证 token 格式
+  if [ "$token" != null ]; then
+    [ "${#token}" -eq 16 ] || return 65
+    case "$token" in *[!0-9a-f]*) return 65 ;; esac
+  fi
+
+  # 尝试正常关闭，失败则降级到宽松模式
+  result=0
+  [ "$token" = null ] || firewall_doh_detach_owned "$token" 2>/dev/null || result=$?
+
+  # 无论 detach 是否成功，都尝试停止进程
+  process_stop_doh a 2>/dev/null || true
+  process_stop_doh b 2>/dev/null || true
+
+  # 尝试 cleanup，即使失败也继续
+  [ "$token" = null ] || firewall_doh_cleanup_owned "$token" 2>/dev/null || true
+
+  # 如果还有残留，使用强制清理
+  if [ "$result" -ne 0 ] || ! doh_commit_disabled 2>/dev/null; then
+    doh_manager_force_disable_runtime
+    return $?
+  fi
+
+  return 0
+}
+
 doh_manager_disable_runtime() {
   [ "$#" -le 1 ] || return 64
   local token result=0
@@ -638,14 +698,40 @@ doh_commit_disabled() {
 }
 
 doh_manager_disable() {
-  local result
-  rules_lock_acquire doh || return
-  doh_bootstrap || { result=$?; rules_lock_release doh; return "$result"; }
-  doh_manager_disable_runtime
-  result=$?
-  [ "$result" -ne 0 ] || doh_disable || result=$?
+  local result attempt=0 max_attempts=2
+
+  # 尝试最多 2 次
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    attempt=$((attempt + 1))
+
+    rules_lock_acquire doh || return
+    doh_bootstrap || { result=$?; rules_lock_release doh; return "$result"; }
+
+    # 第一次使用增强模式，第二次使用强制模式
+    if [ "$attempt" -eq 1 ]; then
+      doh_manager_disable_runtime_enhanced
+    else
+      doh_manager_force_disable_runtime
+    fi
+
+    result=$?
+
+    # 无论是否成功都尝试更新配置
+    [ "$result" -ne 0 ] || doh_disable || result=$?
+
+    rules_lock_release doh || return
+
+    # 成功则返回
+    if [ "$result" -eq 0 ]; then
+      return 0
+    fi
+
+    # 失败则等待后重试
+    [ "$attempt" -lt "$max_attempts" ] && sleep 1
+  done
+
+  # 所有尝试失败，设置错误
   if [ "$result" -ne 0 ]; then doh_manager_set_error recovery_failed || true; fi
-  rules_lock_release doh || return
   return "$result"
 }
 
@@ -759,6 +845,7 @@ doh_manager_dispatch() {
     test:2) doh_manager_test "$2" ;;
     apply:4) doh_manager_apply "$2" "$3" "$4" ;;
     disable:1) doh_manager_disable ;;
+    force-disable:1) rules_lock_acquire doh && doh_manager_force_disable_runtime; result=$?; rules_lock_release doh; return "$result" ;;
     boot:1) doh_manager_boot ;;
     crash:2) doh_manager_crash "$2" ;;
     cleanup-uninstall:1) doh_manager_cleanup_uninstall ;;
