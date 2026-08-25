@@ -74,7 +74,7 @@
 - **玻璃效果**: 三档强度可调
 - **自由组合**: 所有选项可自由搭配
 
-完整说明见 **[功能介绍文档](https://github.com/Darrickisar/JingJie/blob/main/docs/features.md)**。
+完整说明见 **[功能介绍文档](https://github.com/Darrickisar/JingJie/features.md)**。
 
 ---
 
