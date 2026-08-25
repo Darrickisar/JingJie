@@ -99,21 +99,6 @@
 
 ---
 
-## ⚠️ 尚未验证的部分
-
-当前发布环境没有连接已 root 的 Android 设备，因此以下流程**仍需在真机上验证**：
-
-- KernelSU、KernelSU Next、APatch 三个管理器的真实安装、重启、打开入口与卸载流程
-- 重启后的持久生效、IPv4 / IPv6 双栈行为
-- 与 VPN 共存时的行为、指定 UID 的实际作用范围
-
-已经执行的是本地静态测试、WebUI 测试与 BusyBox ash 测试；它们不能替代真机验证。
-详见 [V1.0 发布说明](https://github.com/Darrickisar/JingJie/blob/main/docs/release/v1.0.md) 与 [验证记录](https://github.com/Darrickisar/JingJie/blob/main/docs/release/v1.0-verification.md)。
-
-本项目也不把未经验证的兼容性、拦截率、耗电量或性能提升作为承诺。”低耗电”描述的是默认关闭可选后台能力这一设计取向。
-
----
-
 ## 🛠️ 开发
 
 ### 测试
