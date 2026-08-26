@@ -513,6 +513,31 @@ function afterPanelSettled(tab, callback) {
   });
 }
 
+// 入场动画一结束就摘掉 data-motion-direction，让 will-change 失效、合成层释放。
+// 动画被打断时 finished 会 reject，两条路都要摘；拿不到 finished 时用兜底延时。
+function releaseMotionHint(panel) {
+  const drop = () => {
+    if (disposed) return;
+    delete panel.dataset.motionDirection;
+  };
+  globalThis.requestAnimationFrame(() => {
+    if (disposed) return;
+    const animations = panel.getAnimations?.() ?? [];
+    if (animations.length === 0) {
+      drop();
+      return;
+    }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      drop();
+    };
+    Promise.all(animations.map((animation) => animation.finished)).then(finish, finish);
+    schedule(finish, PANEL_SWITCH_SETTLE_MS);
+  });
+}
+
 function animateInsertedItems(insertedItems) {
   if (globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
   const items = [...insertedItems].slice(0, 12);
@@ -2566,6 +2591,12 @@ function selectTab(tab) {
   panel.dataset.motionDirection = direction;
   warmedPanels.add(panel.id);
   panel.hidden = false;
+  // data-motion-direction 挂着 will-change: transform, opacity。样式表明确写了它
+  // 只该在动画那两百多毫秒里存在，否则「每个面板长期占一层纹理，在 WebView 上
+  // 反而更卡」——但原来它只在面板被隐藏时才删（见上面的 previousPanel 分支），
+  // 当前可见的那一页会一直挂着，等于常驻一层和面板等高的合成纹理。面板越高纹理
+  // 越大，所以规则页与日志页切走时最容易卡。动画收尾就摘掉。
+  releaseMotionHint(panel);
 
   const tabBar = tab.closest('[role="tablist"]');
   tabBar.dataset.activeIndex = String(nextIndex);

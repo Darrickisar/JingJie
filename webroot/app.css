@@ -895,6 +895,20 @@ h3 {
   animation-play-state: paused;
 }
 
+/* 上面只摘掉了「浓郁」档位的折射层，纯模糊那一笔一直没管：切页那两百多毫秒里
+   面板正在做 translate3d，底栏与卡片背后的像素每帧都在变，backdrop-filter 就得
+   每帧重新采样并模糊一遍整块背景。它是 WebView 里最贵的合成操作，而且轻透/标准
+   两档同样在付这笔钱。
+   位移动画本身就会把这点模糊差异盖掉，所以切页期间一律降为无模糊；材质的半透明
+   填充仍在，观感不塌。 */
+:root[data-switching][data-surface="liquid"] .tab-bar,
+:root[data-switching][data-surface="liquid"] .app-chrome,
+:root[data-switching][data-surface="liquid"] #status-rail,
+:root[data-switching][data-surface="liquid"] [data-liquid-surface] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 :root[data-surface="liquid"][data-glass="strong"] .tab-bar::before {
   content: "";
   position: absolute;
