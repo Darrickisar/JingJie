@@ -158,7 +158,6 @@ powershell -NoProfile -File ./scripts/build-module.ps1   # 产出 dist/JingJie-V
 
 ## 🙏 致谢
 
-- [AWAvenue-Ads-Rule（秋风广告规则）](https://github.com/TG-Twilight/AWAvenue-Ads-Rule)
 - [10007 规则](https://github.com/lingeringsound/10007)
 - [@top大佬](https://github.com/410154425/AdGuardHome_magisk)
 - KernelSU、KernelSU Next、APatch 及其模块 WebUI 能力
