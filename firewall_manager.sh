@@ -2703,9 +2703,18 @@ firewall_doh_dispatcher_current_slot() {
     return 0
   fi
   raw="$RULE_TMP/doh-dispatch-current.$$.$family"
-  firewall_doh_xt "$family" -S "$dispatcher" > "$raw" 2>/dev/null || return 76
+  firewall_doh_xt "$family" -S "$dispatcher" > "$raw" 2>/dev/null || {
+    runtime_log_event error firewall dispatcher_list_failed \
+      "$family：无法列出 dispatcher 链 $dispatcher 的规则" || true
+    return 76
+  }
   count=$("$BB" awk -v chain="$dispatcher" '$0 != "-N " chain { count++ } END{print count+0}' "$raw") || { rm -f "$raw"; return 70; }
-  [ "$count" -le 1 ] || { rm -f "$raw"; return 76; }
+  [ "$count" -le 1 ] || {
+    runtime_log_event error firewall dispatcher_multiple_rules \
+      "$family：dispatcher $dispatcher 里有 $count 条规则，预期至多 1 条" || true
+    rm -f "$raw"
+    return 76
+  }
   if [ "$count" -eq 0 ]; then
     rm -f "$raw"
     printf -- '-\n'
@@ -2716,25 +2725,55 @@ firewall_doh_dispatcher_current_slot() {
   case "$line" in
     "-A $dispatcher -j JJD4_A"|"-A $dispatcher -j JJD6_A") slot=A ;;
     "-A $dispatcher -j JJD4_B"|"-A $dispatcher -j JJD6_B") slot=B ;;
-    *) return 76 ;;
+    *)
+      runtime_log_event error firewall dispatcher_unknown_rule \
+        "$family：dispatcher $dispatcher 里的规则不是本模块认识的槽位跳转：<$line>" || true
+      return 76
+      ;;
   esac
   chain=$(firewall_doh_chain_for "$family" "$slot") || return
-  [ "$line" = "-A $dispatcher -j $chain" ] || return 76
+  [ "$line" = "-A $dispatcher -j $chain" ] || {
+    runtime_log_event error firewall dispatcher_family_mismatch \
+      "$family：dispatcher 规则指向的链与本族不符：<$line>" || true
+    return 76
+  }
   printf '%s\n' "$slot"
 }
 
+# 这个函数有四条不同的 76 出口，原来对外只是一个退出码，真机上无法区分。
+# 每条都记下当时观察到的实际值，失败一次就能定位到具体是哪种残留。
 firewall_doh_stage_old_slot() {
-  local family=$1 count slot
-  count=$(firewall_doh_output_jump_count "$family") || return
-  [ "$count" -le 1 ] || return 76
-  slot=$(firewall_doh_dispatcher_current_slot "$family") || return
+  local family=$1 count slot result
+  count=$(firewall_doh_output_jump_count "$family") || {
+    result=$?
+    runtime_log_event error firewall old_slot_jump_count_failed \
+      "$family：读取 OUTPUT 跳转数失败（码 $result）" || true
+    return "$result"
+  }
+  [ "$count" -le 1 ] || {
+    runtime_log_event error firewall old_slot_duplicate_jumps \
+      "$family：OUTPUT 上有 $count 条本模块的跳转，预期至多 1 条" || true
+    return 76
+  }
+  slot=$(firewall_doh_dispatcher_current_slot "$family") || {
+    result=$?
+    runtime_log_event error firewall old_slot_dispatcher_unreadable \
+      "$family：dispatcher 状态无法判定（码 $result），可能是链里有多条规则或规则文本不认识" || true
+    return "$result"
+  }
   if [ "$slot" = - ]; then
     local dispatcher
     dispatcher=$(firewall_doh_dispatcher_for "$family") || return
-    firewall_doh_chain_exists "$family" "$dispatcher" && return 76
-  fi
-  if [ "$slot" = - ]; then
-    [ "$count" -eq 0 ] || return 76
+    firewall_doh_chain_exists "$family" "$dispatcher" && {
+      runtime_log_event error firewall old_slot_leftover_dispatcher \
+        "$family：残留了空的 dispatcher 链 $dispatcher（无槽位规则、OUTPUT 跳转 $count），上次拆除没走完" || true
+      return 76
+    }
+    [ "$count" -eq 0 ] || {
+      runtime_log_event error firewall old_slot_jump_without_dispatcher \
+        "$family：OUTPUT 有 $count 条跳转但 dispatcher 不存在" || true
+      return 76
+    }
   fi
   printf '%s\n' "$slot"
 }
@@ -2996,25 +3035,61 @@ firewall_doh_capability_json() {
 
 firewall_doh_stage_locked() {
   local mode=$1 slot=$2 port=$3 token=$4 uid_file=$5 manifest body old4 old6 capability cap_state line result=0 cleanup_result
-  firewall_doh_mode_valid "$mode" || return
-  firewall_doh_slot_valid "$slot" || return
-  firewall_doh_port_valid "$port" || return
-  firewall_doh_token_valid "$token" || return
-  firewall_doh_uid_file_valid "$uid_file" || return
-  [ "$mode" != selected ] || firewall_doh_selected_uid_file_nonempty "$uid_file" || return
+  firewall_doh_mode_valid "$mode" || { runtime_log_event error firewall stage_mode_invalid "模式 <$mode> 无效" || true; return 65; }
+  firewall_doh_slot_valid "$slot" || { runtime_log_event error firewall stage_slot_invalid "槽位 <$slot> 无效" || true; return 65; }
+  firewall_doh_port_valid "$port" || { runtime_log_event error firewall stage_port_invalid "端口 <$port> 无效" || true; return 65; }
+  firewall_doh_token_valid "$token" || { runtime_log_event error firewall stage_token_invalid "令牌 <$token> 无效" || true; return 65; }
+  firewall_doh_uid_file_valid "$uid_file" || {
+    result=$?
+    runtime_log_event error firewall stage_uid_file_rejected \
+      "uid 文件 <$uid_file> 被拒绝（码 $result），必须位于 $RULE_TMP 之下" || true
+    return "$result"
+  }
+  [ "$mode" != selected ] || firewall_doh_selected_uid_file_nonempty "$uid_file" || {
+    runtime_log_event error firewall stage_uid_file_empty "分应用模式下 uid 文件为空" || true
+    return 65
+  }
   mkdir -p "$(firewall_doh_dir)" || return 73
+  firewall_doh_reconcile_stale_locked
   manifest=$(firewall_doh_manifest "$token")
-  [ ! -e "$manifest" ] && [ ! -L "$manifest" ] || return 76
+  [ ! -e "$manifest" ] && [ ! -L "$manifest" ] || {
+    runtime_log_event error firewall stage_manifest_exists "清单 $manifest 已存在" || true
+    return 76
+  }
   capability=$(firewall_doh_capability_locked)
   cap_state=${capability%% *}
-  [ "$cap_state" = supported ] || return 69
-  old4=$(firewall_doh_stage_old_slot ipv4) || return
-  old6=$(firewall_doh_stage_old_slot ipv6) || return
-  [ "$old4" = "$old6" ] || return 76
-  [ "$old4" != "$slot" ] || return 76
+  [ "$cap_state" = supported ] || {
+    runtime_log_event error firewall stage_unsupported \
+      "内核缺少所需防火墙能力：$capability" || true
+    return 69
+  }
+  old4=$(firewall_doh_stage_old_slot ipv4) || {
+    result=$?
+    runtime_log_event error firewall stage_old_slot_ipv4 "读取 ipv4 旧槽位失败（码 $result）" || true
+    return "$result"
+  }
+  old6=$(firewall_doh_stage_old_slot ipv6) || {
+    result=$?
+    runtime_log_event error firewall stage_old_slot_ipv6 "读取 ipv6 旧槽位失败（码 $result）" || true
+    return "$result"
+  }
+  [ "$old4" = "$old6" ] || {
+    runtime_log_event error firewall stage_slot_mismatch "两族旧槽位不一致：ipv4=$old4 ipv6=$old6" || true
+    return 76
+  }
+  [ "$old4" != "$slot" ] || {
+    runtime_log_event error firewall stage_slot_in_use "目标槽位 $slot 正是当前活动槽位" || true
+    return 76
+  }
   if [ "$old4" != - ]; then
-    firewall_doh_active_slot_owned ipv4 "$old4" || return 76
-    firewall_doh_active_slot_owned ipv6 "$old6" || return 76
+    firewall_doh_active_slot_owned ipv4 "$old4" || {
+      runtime_log_event error firewall stage_slot_not_owned "ipv4 槽位 $old4 不由本模块拥有" || true
+      return 76
+    }
+    firewall_doh_active_slot_owned ipv6 "$old6" || {
+      runtime_log_event error firewall stage_slot_not_owned "ipv6 槽位 $old6 不由本模块拥有" || true
+      return 76
+    }
   fi
   body="$RULE_TMP/doh-firewall-$token.body.$$"
   : > "$body" || return 74
@@ -3030,6 +3105,9 @@ firewall_doh_stage_locked() {
     case "$line" in doh-slot-v1*) firewall_doh_apply_slot_record_locked "$line" || { result=$?; break; } ;; esac
   done < "$body"
   if [ "$result" -ne 0 ]; then
+    # 码 76 在这里几乎总是“槽位链已存在”——上一次关闭没把它删干净。
+    runtime_log_event error firewall stage_apply_failed \
+      "布设槽位规则失败（码 $result）；76 通常表示槽位链已存在于内核" || true
     firewall_doh_cleanup_new_slots_from_body "$body" || cleanup_result=$?
     rm -f "$body"
     [ "${cleanup_result:-0}" -eq 0 ] || return 76
@@ -3492,9 +3570,152 @@ firewall_doh_remove_owned() {
   return "$result"
 }
 
+# A previous enable/disable cycle that was interrupted while tearing down can
+# leave two inert artifacts behind: an empty dispatcher chain (no OUTPUT jump and
+# no rules) and a slot chain no dispatcher points at. Neither carries traffic,
+# but stage_old_slot rejects an existing-yet-empty dispatcher with 76 and
+# apply_slot_record rejects a pre-existing slot chain with 76 -- and because a
+# fresh enable always targets slot a, that leftover makes every enable after the
+# first one fail with runtime_failed. Reconcile them before staging.
+firewall_doh_any_active_manifest() {
+  local dir file
+  dir=$(firewall_doh_dir)
+  [ -d "$dir" ] || return 1
+  for file in "$dir"/firewall-*.tsv; do
+    [ -e "$file" ] || continue
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    firewall_doh_manifest_load "$file" 2>/dev/null || continue
+    [ "$DOH_STATE" = active ] || continue
+    return 0
+  done
+  return 1
+}
+
+# 两族 OUTPUT 跳转的总数。读不到就按“有流量”处理：宁可什么都不动，
+# 也不能凭一次失败的读取去拆真正在服务的转发。
+firewall_doh_live_output_jumps() {
+  local family jumps total=0
+  for family in ipv4 ipv6; do
+    jumps=$(firewall_doh_output_jump_count "$family" 2>/dev/null || printf 1)
+    case "$jumps" in ''|*[!0-9]*) jumps=1 ;; esac
+    total=$((total + jumps))
+  done
+  printf '%s\n' "$total"
+}
+
+# 两族都没有 OUTPUT 跳转时，清单上的 active 只可能是上一次拆除被打断留下的
+# 陈旧记录：没有任何 DNS 流量经过本模块，却还挂着“正在运行”。把它删掉，
+# 紧随其后的链回收循环会把对应的 dispatcher 与槽位链一并清掉。
+firewall_doh_reclaim_stale_manifests_locked() {
+  local dir file token
+  dir=$(firewall_doh_dir)
+  [ -d "$dir" ] || return 0
+  for file in "$dir"/firewall-*.tsv; do
+    [ -e "$file" ] || continue
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    if ! firewall_doh_manifest_load "$file" 2>/dev/null; then
+      rm -f "$file"
+      runtime_log_event info firewall reclaimed_unreadable_manifest \
+        "删除了无法解析的清单 ${file##*/}" || true
+      continue
+    fi
+    token=$DOH_TOKEN
+    [ "$DOH_STATE" = active ] || continue
+    rm -f "$file" || continue
+    runtime_log_event info firewall reclaimed_stale_manifest \
+      "回收陈旧的 active 清单 $token：两族 OUTPUT 跳转均为 0，没有流量经过本模块" || true
+  done
+}
+
+# 删除 OUTPUT 上所有跳向指定链的规则，不管规则文本长什么样。
+#
+# output_jump_count 只认一条精确文本（-m comment --comment <id>:doh -j <链>）。
+# 真机上只要那条引用的渲染形式与预期有一点出入（旧版本留下的、匹配器顺序不同的、
+# 注释被内核改写的），它就数不到：于是 reconcile 认为没有流量、去删 dispatcher，
+# 而内核因为引用仍在而拒绝删除，-X 的失败又被吞掉，残留就永久留下了。
+# 按目标（-j <链>）而不是按整行文本来删，才能真正把引用清干净。
+firewall_doh_purge_output_references() {
+  local family=$1 chain=$2 raw index removed=0 guard=0
+  raw="$RULE_TMP/doh-output-refs.$$.$family"
+  while [ "$guard" -lt 32 ]; do
+    guard=$((guard + 1))
+    firewall_doh_xt "$family" -S OUTPUT > "$raw" 2>/dev/null || { rm -f "$raw"; printf '%s\n' "$removed"; return 0; }
+    # -S 按顺序列出 OUTPUT 的规则，第 N 条 "-A OUTPUT" 就是索引 N。
+    index=$("$BB" awk -v chain="$chain" '
+      /^-A OUTPUT /{ n++; if($0 ~ ("-j " chain "$")) { print n; exit } }
+    ' "$raw") || { rm -f "$raw"; printf '%s\n' "$removed"; return 0; }
+    [ -n "$index" ] || break
+    firewall_doh_xt "$family" -D OUTPUT "$index" 2>/dev/null || break
+    removed=$((removed + 1))
+  done
+  rm -f "$raw"
+  printf '%s\n' "$removed"
+}
+
+firewall_doh_reconcile_stale_locked() {
+  local family dispatcher slot chain jumps live purged
+  live=$(firewall_doh_live_output_jumps)
+  # 只要还有一族把 DNS 引向 dispatcher，就说明加密 DNS 真的在跑：一律不碰，
+  # 由持有该事务的一方负责。
+  [ "$live" -eq 0 ] || return 0
+  # 原来这里是 `firewall_doh_any_active_manifest && return 0`，直接信任磁盘上的
+  # active 标记。一次被打断的拆除会留下 active 清单，于是 reconcile 被永久挡住，
+  # stage_old_slot 每次都撞上残留的 dispatcher 返回 76 —— 用户看到的就是第三次
+  # 之后再也无法启用，且只能靠强制清理才能恢复。
+  firewall_doh_reclaim_stale_manifests_locked
+  for family in ipv4 ipv6; do
+    dispatcher=$(firewall_doh_dispatcher_for "$family") || continue
+    jumps=$(firewall_doh_output_jump_count "$family" 2>/dev/null || printf 1)
+    case "$jumps" in ''|*[!0-9]*) jumps=1 ;; esac
+    # A live OUTPUT jump means traffic still reaches the dispatcher: leave it be.
+    [ "$jumps" -eq 0 ] || continue
+    # Nothing routes into the dispatcher and no manifest owns it, so the whole
+    # subtree is inert. Drop the dispatcher first: while it still references a
+    # slot chain, deleting that chain would fail.
+    if firewall_doh_chain_exists "$family" "$dispatcher" 2>/dev/null; then
+      firewall_doh_xt "$family" -F "$dispatcher" 2>/dev/null || continue
+      if ! firewall_doh_xt "$family" -X "$dispatcher" 2>/dev/null; then
+        # 删不掉只有一个原因：还有规则跳向它，而那条引用没被精确文本数到。
+        # 按目标清掉所有引用再删一次。
+        purged=$(firewall_doh_purge_output_references "$family" "$dispatcher")
+        [ "${purged:-0}" -eq 0 ] || runtime_log_event info firewall purged_unmatched_jump \
+          "$family：清掉了 $purged 条未被识别的、跳向 $dispatcher 的 OUTPUT 规则" || true
+        if ! firewall_doh_xt "$family" -X "$dispatcher" 2>/dev/null; then
+          runtime_log_event error firewall dispatcher_undeletable \
+            "$family：$dispatcher 清空后仍无法删除，仍有未知引用指向它" || true
+          continue
+        fi
+      fi
+      runtime_log_event info firewall reconciled_stale_dispatcher \
+        "回收了上次遗留的 dispatcher 链 $dispatcher" || true
+    fi
+    # 槽位名必须大写：firewall_doh_slot_valid 只接受 A|B，传小写会让
+    # chain_for 返回 65，整个清理循环被 continue 跳过，残留链永远不会被删。
+    for slot in A B; do
+      chain=$(firewall_doh_chain_for "$family" "$slot") || continue
+      firewall_doh_chain_exists "$family" "$chain" 2>/dev/null || continue
+      firewall_doh_xt "$family" -F "$chain" 2>/dev/null || continue
+      firewall_doh_xt "$family" -X "$chain" 2>/dev/null || true
+      runtime_log_event info firewall reconciled_stale_chain \
+        "回收了上次遗留的槽位链 $chain" || true
+    done
+  done
+  return 0
+}
+
 # 新增：强制清理所有 DoH 防火墙资源
+firewall_doh_force_cleanup_entry() {
+  local result
+  rules_init_paths "$MODDIR" || return
+  rules_lock_acquire firewall || return
+  firewall_doh_force_cleanup
+  result=$?
+  rules_lock_release firewall || return
+  return "$result"
+}
+
 firewall_doh_force_cleanup() {
-  local family chain result=0
+  local family chain slot result=0
 
   for family in ipv4 ipv6; do
     # 1. 强制移除 OUTPUT 跳转（可能有多条）
@@ -3508,6 +3729,19 @@ firewall_doh_force_cleanup() {
       firewall_doh_xt "$family" -F "$chain" 2>/dev/null || true
       firewall_doh_xt "$family" -X "$chain" 2>/dev/null || true
     fi
+
+    # 3. 清空并删除两个槽位链。dispatcher 已先删除，此时槽位链再无引用。
+    #    漏掉这一步会把 JJD4_A/JJD6_A 留在内核里，而下一次启用固定从
+    #    槽位 A 开始，apply_slot_record 遇到已存在的链就返回 76，用户看到的
+    #    就是“加密 DNS 运行失败”。
+    for slot in A B; do
+      chain=$(firewall_doh_chain_for "$family" "$slot" 2>/dev/null) || continue
+      firewall_doh_chain_exists "$family" "$chain" 2>/dev/null || continue
+      firewall_doh_xt "$family" -F "$chain" 2>/dev/null || true
+      firewall_doh_xt "$family" -X "$chain" 2>/dev/null || true
+      runtime_log_event info firewall force_cleanup_chain \
+        "强制清理删除了槽位链 $chain" || true
+    done
   done
 
   return 0
@@ -3564,7 +3798,13 @@ firewall_doh_detach_owned_locked() {
     local disp4 disp6 empty=1
     disp4=$(firewall_doh_dispatcher_for ipv4 2>/dev/null) && firewall_doh_chain_exists ipv4 "$disp4" 2>/dev/null && ! firewall_doh_chain_empty ipv4 "$disp4" 2>/dev/null && empty=0
     disp6=$(firewall_doh_dispatcher_for ipv6 2>/dev/null) && firewall_doh_chain_exists ipv6 "$disp6" 2>/dev/null && ! firewall_doh_chain_empty ipv6 "$disp6" 2>/dev/null && empty=0
-    [ "$empty" -eq 1 ] && return 0
+    # 这条捷径返回成功，但 dispatcher 链与仍标着 active 的清单都还在盘上/内核里，
+    # 完全依赖随后的 cleanup_owned 收尾。它一旦没跑或失败，残留就留下了。
+    [ "$empty" -eq 1 ] && {
+      runtime_log_event info firewall detach_already_done \
+        "OUTPUT 跳转已为 0 且 dispatcher 为空，跳过摘除；链与清单交由后续回收" || true
+      return 0
+    }
   fi
 
   firewall_doh_detach_dispatcher_locked "$manifest" ipv4 || {
@@ -3602,19 +3842,39 @@ firewall_doh_cleanup_owned_locked() {
   firewall_doh_token_valid "$token" || return
   manifest=$(firewall_doh_manifest "$token")
   [ -e "$manifest" ] || { [ ! -L "$manifest" ] || return 76; return 0; }
-  firewall_doh_manifest_load "$manifest" || return 76
-  [ "$DOH_STATE" = active ] || return 76
+  firewall_doh_manifest_load "$manifest" || {
+    runtime_log_event error firewall cleanup_manifest_unreadable \
+      "清单 $token 无法解析，回收中止（残留会留在内核里）" || true
+    return 76
+  }
+  [ "$DOH_STATE" = active ] || {
+    runtime_log_event error firewall cleanup_manifest_not_active \
+      "清单 $token 的状态是 <$DOH_STATE> 而非 active，回收中止" || true
+    return 76
+  }
   for family in ipv4 ipv6; do
     count=$(firewall_doh_output_jump_count "$family") || return
-    [ "$count" -eq 0 ] || return 76
+    [ "$count" -eq 0 ] || {
+      runtime_log_event error firewall cleanup_jump_still_present \
+        "$family：OUTPUT 仍有 $count 条跳转，回收中止" || true
+      return 76
+    }
     dispatcher=$(firewall_doh_dispatcher_for "$family") || return
     if firewall_doh_chain_exists "$family" "$dispatcher"; then
       count=$(firewall_doh_dispatcher_rule_count "$family" "$dispatcher") || return 76
-      [ "$count" -eq 0 ] || return 76
+      [ "$count" -eq 0 ] || {
+        runtime_log_event error firewall cleanup_dispatcher_not_empty \
+          "$family：dispatcher 仍有 $count 条规则，回收中止" || true
+        return 76
+      }
       firewall_doh_chain_empty "$family" "$dispatcher" || return 76
     fi
   done
-  firewall_doh_preflight_manifest_chains "$manifest" || return 76
+  firewall_doh_preflight_manifest_chains "$manifest" || {
+    runtime_log_event error firewall cleanup_preflight_failed \
+      "清单 $token 记录的链与内核实际不符，回收中止" || true
+    return 76
+  }
   "$BB" awk '{line[NR]=$0} END{for(i=NR;i>=1;i--) print line[i]}' "$manifest" | while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in doh-slot-v1*|doh-old-slot-v1*) firewall_doh_remove_slot_record_locked "$line" || exit $? ;; esac
   done || result=$?
@@ -3796,7 +4056,7 @@ firewall_dispatch() {
     doh-remove-owned:2) firewall_doh_remove_owned "$2" ;;
     doh-detach-owned:2) firewall_doh_detach_owned "$2" ;;
     doh-cleanup-owned:2) firewall_doh_cleanup_owned "$2" ;;
-    doh-force-cleanup:1) rules_lock_acquire firewall && firewall_doh_force_cleanup; result=$?; rules_lock_release firewall; return "$result" ;;
+    doh-force-cleanup:1) firewall_doh_force_cleanup_entry ;;
     doh-cleanup-recovery:1) firewall_doh_cleanup_recovery ;;
     *) return 64 ;;
   esac

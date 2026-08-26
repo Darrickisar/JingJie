@@ -2,6 +2,7 @@
 
 RULE_MODULE_ID=jingjie_hosts
 RULE_LOG_LIMIT=262144
+RUNTIME_LOG_LIMIT=262144
 
 rules_init_paths() {
   MODDIR=$1
@@ -14,11 +15,12 @@ rules_init_paths() {
   CACHE_DIR="$MODDIR/cache"
   RULE_RUNTIME="$MODDIR/runtime"
   RULE_LOG="$RULE_RUNTIME/logs/rule-engine.log"
+  RUNTIME_LOG="$RULE_RUNTIME/logs/runtime.log"
   RULE_TMP="$RULE_RUNTIME/tmp"
   RULE_LOCKS="$RULE_RUNTIME/locks"
   RULE_GENERATIONS="$RULE_RUNTIME/generations"
   RULE_OPERATIONS="$RULE_RUNTIME/operations"
-  export MODDIR CONFIG_DIR CACHE_DIR RULE_RUNTIME RULE_LOG RULE_TMP
+  export MODDIR CONFIG_DIR CACHE_DIR RULE_RUNTIME RULE_LOG RUNTIME_LOG RULE_TMP
   export RULE_LOCKS RULE_GENERATIONS RULE_OPERATIONS
 
   mkdir -p "$CONFIG_DIR/revisions" "$CACHE_DIR/custom" \
@@ -168,28 +170,38 @@ json_escape() {
   '
 }
 
+# 把一条已成型的 JSON 行追加到日志文件，超过上限时轮转一代。
+# log_event 与 runtime_log_event 共用，轮转逻辑只保留一份。
+log_write_rotating() {
+  log_file=$1
+  log_limit=$2
+  log_line=$3
+  mkdir -p "${log_file%/*}" "$RULE_TMP" || return 73
+  entry_tmp="$RULE_TMP/log.$$.$(date +%s 2>/dev/null || printf '0')"
+  printf '%s\n' "$log_line" > "$entry_tmp" || return 74
+
+  current_size=0
+  [ ! -f "$log_file" ] || current_size=$(wc -c < "$log_file" | tr -d ' ')
+  entry_size=$(wc -c < "$entry_tmp" | tr -d ' ')
+  if [ $((current_size + entry_size)) -gt "$log_limit" ]; then
+    rm -f "$log_file.2"
+    [ ! -f "$log_file" ] || mv -f "$log_file" "$log_file.1" || { rm -f "$entry_tmp"; return 74; }
+  fi
+  cat "$entry_tmp" >> "$log_file" || { rm -f "$entry_tmp"; return 74; }
+  rm -f "$entry_tmp"
+}
+
 log_event() {
   level=$1
   code=$2
   message=$3
-  mkdir -p "${RULE_LOG%/*}" "$RULE_TMP" || return 73
   now=$(date +%s 2>/dev/null || printf '0')
   level_json=$(printf '%s' "$level" | json_escape)
   code_json=$(printf '%s' "$code" | json_escape)
   message_json=$(printf '%s' "$message" | json_escape)
-  entry_tmp="$RULE_TMP/log.$$.$now"
-  printf '{"time":%s,"level":"%s","code":"%s","message":"%s"}\n' \
-    "$now" "$level_json" "$code_json" "$message_json" > "$entry_tmp" || return 74
-
-  current_size=0
-  [ ! -f "$RULE_LOG" ] || current_size=$(wc -c < "$RULE_LOG" | tr -d ' ')
-  entry_size=$(wc -c < "$entry_tmp" | tr -d ' ')
-  if [ $((current_size + entry_size)) -gt "$RULE_LOG_LIMIT" ]; then
-    rm -f "$RULE_LOG.2"
-    [ ! -f "$RULE_LOG" ] || mv -f "$RULE_LOG" "$RULE_LOG.1" || return 74
-  fi
-  cat "$entry_tmp" >> "$RULE_LOG" || return 74
-  rm -f "$entry_tmp"
+  log_write_rotating "$RULE_LOG" "$RULE_LOG_LIMIT" \
+    "$(printf '{"time":%s,"level":"%s","code":"%s","message":"%s"}' \
+      "$now" "$level_json" "$code_json" "$message_json")"
 }
 
 # 日志档位：off / blocked_error / all。只有选“全部模块事件”时才写明细事件
@@ -209,4 +221,39 @@ log_mode_is_all() {
 log_verbose_event() {
   log_mode_is_all || return 0
   log_event "$@"
+}
+
+# 运行日志开关：runtime-log.prop 的 enabled=1。文件缺失时视为开启——
+# 这份日志的唯一用途是定位故障，宁可多写也不要在用户真正需要时是空的。
+runtime_log_enabled() {
+  [ -n "${CONFIG_DIR-}" ] || return 1
+  [ -f "$CONFIG_DIR/runtime-log.prop" ] || return 0
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    [ "$key" = enabled ] || continue
+    [ "$value" = 1 ] && return 0
+    return 1
+  done < "$CONFIG_DIR/runtime-log.prop"
+  return 0
+}
+
+# 全模块运行日志。比 log_event 多一个 stage 字段，用来标出失败发生在哪一步。
+#
+# level=error 无条件写盘，即使开关是关闭的：加密 DNS 曾经只留下一句
+# last_error=runtime_failed，没有任何过程记录，整整两天无法定位失败点。
+# 开关控制的是每步成功的明细（info/debug），那些才是平时的噪音来源。
+runtime_log_event() {
+  [ "$#" -eq 4 ] || return 64
+  level=$1
+  stage=$2
+  code=$3
+  message=$4
+  [ "$level" = error ] || runtime_log_enabled || return 0
+  now=$(date +%s 2>/dev/null || printf '0')
+  level_json=$(printf '%s' "$level" | json_escape)
+  stage_json=$(printf '%s' "$stage" | json_escape)
+  code_json=$(printf '%s' "$code" | json_escape)
+  message_json=$(printf '%s' "$message" | json_escape)
+  log_write_rotating "$RUNTIME_LOG" "$RUNTIME_LOG_LIMIT" \
+    "$(printf '{"time":%s,"level":"%s","stage":"%s","code":"%s","message":"%s"}' \
+      "$now" "$level_json" "$stage_json" "$code_json" "$message_json")"
 }

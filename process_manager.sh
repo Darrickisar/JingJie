@@ -227,6 +227,11 @@ process_doh_ready_validate() {
   [ "$(wc -l < "$file" | "$BB" tr -d ' ')" -eq 1 ] || return 1
   port=$(process_doh_port_for_slot "$slot") || return
   IFS= read -r line < "$file" || return 1
+  # A line carrying another transition's token cannot legitimately appear here:
+  # the readiness path is per-transition and process_start_doh_locked refuses to
+  # start at all when a file for this transition already exists. So a complete
+  # line that disagrees stays a hard mismatch -- polling it would burn the whole
+  # readiness budget waiting for a file nothing is going to rewrite.
   [ "$line" = "READY $transition $port" ] || return 65
 }
 
@@ -494,22 +499,39 @@ process_doh_supervisor_mark_stop() {
   [ -z "${PROCESS_DOH_CHILD_PID-}" ] || kill -TERM "$PROCESS_DOH_CHILD_PID" 2>/dev/null || true
 }
 
+# The supervisor runs detached with its output appended to the module log, but
+# every early return below happens before anything is written, so a supervisor
+# that refuses to start leaves no trace at all and the caller can only report a
+# generic timeout. Record the exact rejection point so the failure is diagnosable.
+process_doh_supervisor_fail() {
+  local reason=$1 dir="${RULE_RUNTIME:-$MODDIR/runtime}/doh"
+  mkdir -p "$dir" 2>/dev/null || true
+  {
+    printf 'reason=%s\n' "$reason"
+    printf 'at=%s\n' "$(date +%s 2>/dev/null || printf 0)"
+  } > "$dir/supervisor-fail.prop" 2>/dev/null || true
+  printf 'jingjie-doh-supervisor: %s\n' "$reason" >&2
+  # 同时进运行日志：这句原来只写到 supervisor-fail.prop 和 stderr，而 stderr 是
+  # 被重定向进 rule-engine.log 的，用户在「运行日志」里永远看不到伴随进程的死因。
+  runtime_log_event error process supervisor_failed "监护进程报告：$reason" || true
+}
+
 process_doh_supervisor_main() {
-  [ "$#" -eq 6 ] || return 64
+  [ "$#" -eq 6 ] || { process_doh_supervisor_fail "argc=$#"; return 64; }
   local slot=$1 transition=$2 config_file=$3 ready_file=$4 process_token=$5 role=$6
-  local binary child attempt result=1 reason crash_file exact generic slot_file
-  process_doh_slot_valid "$slot" || return
-  process_doh_transition_valid "$transition" || return
-  [ "$role" = "$(process_doh_role_for_slot "$slot")" ] || return 65
-  operation_token_valid "$process_token" || return 65
-  rules_init_paths "$MODDIR" || return
-  process_doh_config_valid "$config_file" || return
-  mkdir -p "$(process_doh_dir)" || return 73
-  chmod 700 "$(process_doh_dir)" || return 74
-  [ ! -f "$RULE_RUNTIME/uninstalling" ] || return 75
-  binary=$(process_doh_binary_validate) || return
-  exact=$(process_doh_stop_marker_path "$role" "$transition") || return
-  generic=$(process_doh_generic_stop_marker_path "$role") || return
+  local binary child attempt result=1 reason crash_file exact generic slot_file rc
+  process_doh_slot_valid "$slot" || { rc=$?; process_doh_supervisor_fail "slot_invalid:$slot"; return "$rc"; }
+  process_doh_transition_valid "$transition" || { rc=$?; process_doh_supervisor_fail "transition_invalid"; return "$rc"; }
+  [ "$role" = "$(process_doh_role_for_slot "$slot")" ] || { process_doh_supervisor_fail "role_mismatch:$role"; return 65; }
+  operation_token_valid "$process_token" || { process_doh_supervisor_fail "process_token_invalid"; return 65; }
+  rules_init_paths "$MODDIR" || { rc=$?; process_doh_supervisor_fail "rules_init_paths:$rc"; return "$rc"; }
+  process_doh_config_valid "$config_file" || { rc=$?; process_doh_supervisor_fail "config_invalid:$rc:$config_file"; return "$rc"; }
+  mkdir -p "$(process_doh_dir)" || { process_doh_supervisor_fail "mkdir_process_dir"; return 73; }
+  chmod 700 "$(process_doh_dir)" || { process_doh_supervisor_fail "chmod_process_dir"; return 74; }
+  [ ! -f "$RULE_RUNTIME/uninstalling" ] || { process_doh_supervisor_fail "uninstalling"; return 75; }
+  binary=$(process_doh_binary_validate) || { rc=$?; process_doh_supervisor_fail "binary_invalid:$rc"; return "$rc"; }
+  exact=$(process_doh_stop_marker_path "$role" "$transition") || { rc=$?; process_doh_supervisor_fail "stop_marker_path:$rc"; return "$rc"; }
+  generic=$(process_doh_generic_stop_marker_path "$role") || { rc=$?; process_doh_supervisor_fail "generic_marker_path:$rc"; return "$rc"; }
   rm -f "$exact" "$generic" "$ready_file"
 
   PROCESS_DOH_ROLE=$role
@@ -536,11 +558,18 @@ process_doh_supervisor_main() {
     }
   else
     process_doh_supervisor_mark_stop
+    process_doh_supervisor_fail "child_identity_lost:exe=${PROCESS_EXE:-none}"
   fi
 
   wait "$child"
   result=$?
   trap - TERM INT
+  # A non-zero companion exit is the single most common real cause of
+  # "encrypted DNS failed to run": the process started, then rejected its own
+  # config, could not bind, or could not reach the upstream. Its stderr already
+  # went to the module log; record the exit code alongside it so the failing
+  # step is identifiable without re-running anything.
+  [ "$result" -eq 0 ] || process_doh_supervisor_fail "companion_exit=$result"
   slot_file=$(process_doh_slot_file "$slot") || return 74
   if [ -f "$slot_file" ] && [ ! -L "$slot_file" ] &&
     [ "$(process_doh_slot_transition "$slot" 2>/dev/null || true)" = "$transition" ]; then
@@ -579,25 +608,92 @@ process_doh_wait_ready() {
   # Readiness legitimately includes loading every Android trust root, binding
   # four sockets and a TLS handshake to the upstream, so the old five-second
   # budget was too tight on a phone even once the poll stopped aborting early.
-  local role=$1 slot=$2 transition=$3 ready_file=$4 attempt=0 result attempts=${PROCESS_DOH_READY_ATTEMPTS:-300}
-  decimal_uint_in_range "$attempts" 600 1 || return 65
+  #
+  # The companion's own exchange timeout is 10s and readiness self-queries each
+  # bound address family in turn, so two required checks alone can consume 20s on
+  # a slow network -- past the previous 15s budget, which then killed a companion
+  # that was merely slow and reported it as a startup failure. The budget is now
+  # 45s by default. Raising it does not slow down real failures: a companion that
+  # rejects its config or cannot bind exits within a second, and the child-liveness
+  # check below returns as soon as that happens instead of waiting out the clock.
+  local role=$1 slot=$2 transition=$3 ready_file=$4 attempt=0 result attempts=${PROCESS_DOH_READY_ATTEMPTS:-900}
+  local child_pid slot_file slot_token identity_result
+  decimal_uint_in_range "$attempts" 1200 1 || return 65
+  slot_file=$(process_doh_slot_file "$slot") || return
   while [ "$attempt" -lt "$attempts" ]; do
-    process_record_load "$role" 2>/dev/null || return 69
-    process_identity_matches_loaded || return 69
+    # 这五条 69 出口原来对外只是同一个退出码，真机上分不出是进程自己退了、
+    # 身份变了，还是等满了预算。每条各记一次，失败一次就能定位。
+    process_record_load "$role" 2>/dev/null || {
+      runtime_log_event error process ready_record_lost \
+        "槽位 $slot：等待就绪时进程记录读不到了（第 $attempt 次轮询）" || true
+      return 69
+    }
+    process_identity_matches_loaded || {
+      runtime_log_event error process ready_identity_changed \
+        "槽位 $slot：进程身份与记录不符（第 $attempt 次轮询），疑似被系统杀掉后 pid 复用" || true
+      return 69
+    }
     process_doh_ready_validate "$ready_file" "$slot" "$transition"
     result=$?
     case "$result" in
       0)
-        process_doh_child_identity_validate "$slot" "$transition" || return 69
-        rm -f "$ready_file"
-        return 0
+        process_doh_child_identity_validate "$slot" "$transition"
+        identity_result=$?
+        case "$identity_result" in
+          0)
+            rm -f "$ready_file"
+            return 0
+            ;;
+          # 码 1 的唯一含义是「监护进程还没写完子进程记录」。那份记录由监护进程
+          # 在另一个进程里写，与伴随进程自报就绪是并发的：伴随进程先就绪就会撞上
+          # 这一刻。原来这里把所有非零一律压成 69 直接失败，于是一次健康的启动被
+          # 报成“伴随进程未能就绪”，赢没赢到这个竞态全看运气 —— 第一次启用失败、
+          # 第二次就成功，正是这个原因。它是“还没到”，继续轮询。
+          #
+          # 上面的 process_doh_ready_validate 早就为同一类问题做过这个区分，
+          # 见它自己的注释；这一行是当时漏掉的另一半。
+          1) ;;
+          *)
+            runtime_log_event error process ready_child_identity_invalid \
+              "槽位 $slot：就绪标记已出现，但子进程身份校验失败（码 $identity_result）" || true
+            return 69
+            ;;
+        esac
         ;;
       1) ;;
-      *) return "$result" ;;
+      *)
+        runtime_log_event error process ready_validate_failed \
+          "槽位 $slot：就绪标记校验失败（码 $result）" || true
+        return "$result"
+        ;;
     esac
+    # Once the supervisor has recorded its child, a dead child means the companion
+    # exited on its own -- do not keep polling for a readiness marker that can
+    # never arrive. Only this transition's record counts: a supervisor killed with
+    # SIGKILL leaves its slot file behind, and treating that dead pid as ours would
+    # fail a healthy start instantly. Checked once per second rather than every
+    # tick to keep the poll cheap.
+    if [ $((attempt % 20)) -eq 19 ] && [ -f "$slot_file" ] && [ ! -L "$slot_file" ]; then
+      slot_token=$("$BB" awk -F= '$1=="transition_token"{print $2; exit}' "$slot_file" 2>/dev/null || true)
+      if [ "$slot_token" = "$transition" ]; then
+        child_pid=$("$BB" awk -F= '$1=="child_pid"{print $2; exit}' "$slot_file" 2>/dev/null || true)
+        case "$child_pid" in
+          ''|*[!0-9]*) ;;
+          *)
+            kill -0 "$child_pid" 2>/dev/null || {
+              runtime_log_event error process ready_child_exited \
+                "槽位 $slot：伴随进程 pid $child_pid 在就绪前自行退出（约 $((attempt / 20)) 秒）；请看它自己的崩溃原因" || true
+              return 69
+            }
+            ;;
+        esac
+      fi
+    fi
     attempt=$((attempt + 1))
     sleep 0.05
   done
+  runtime_log_event error process ready_budget_exhausted \
+    "槽位 $slot：等待就绪超时（$attempts 次轮询，约 $((attempts / 20)) 秒仍未就绪）" || true
   return 69
 }
 
@@ -843,6 +939,50 @@ process_doh_mark_stop() {
   fi
 }
 
+# A companion orphaned by a failed teardown still holds its slot's listen port,
+# and the record that named it is already gone -- so the identity check above
+# finds nothing and the launch proceeds straight into a bind conflict, where the
+# companion exits before signalling readiness. That surfaces as a bare timeout
+# (69) with no indication that a stale process is the cause.
+#
+# Only genuinely unowned companions may be reaped. During an A/B hot swap the
+# previous slot's companion is still serving traffic and is still named by its
+# slot record, so killing by binary path alone would tear down a working
+# resolver. Match on the module's own binary AND on the absence of a slot record
+# claiming that pid.
+process_doh_pid_claimed() {
+  [ "$#" -eq 1 ] || return 64
+  local wanted=$1 file recorded
+  for file in "$(process_doh_dir)"/slot-a.prop "$(process_doh_dir)"/slot-b.prop; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    recorded=$("$BB" awk -F= '$1=="child_pid"{print $2; exit}' "$file" 2>/dev/null || true)
+    [ "$recorded" = "$wanted" ] && return 0
+  done
+  return 1
+}
+
+process_doh_reap_orphan_companions() {
+  local binary proc_root=${DOH_PROC_ROOT:-/proc} path pid exe attempt
+  binary=$(process_doh_binary_validate) || return
+  [ -d "$proc_root" ] || return 0
+  for path in "$proc_root"/[0-9]*; do
+    [ -d "$path" ] || continue
+    pid=${path##*/}
+    [ "$pid" != "$$" ] || continue
+    exe=$("$BB" readlink "$path/exe" 2>/dev/null || true)
+    [ "$exe" = "$binary" ] || continue
+    process_doh_pid_claimed "$pid" && continue
+    kill -9 "$pid" 2>/dev/null || continue
+    attempt=0
+    while [ "$attempt" -lt 20 ]; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.05
+      attempt=$((attempt + 1))
+    done
+  done
+  return 0
+}
+
 process_start_doh_locked() {
   [ "$#" -eq 3 ] || return 64
   local slot=$1 transition=$2 config_file=$3 role process_token ready_file child attempt result
@@ -852,10 +992,21 @@ process_start_doh_locked() {
   process_doh_config_valid "$config_file" || return
   [ ! -f "$RULE_RUNTIME/uninstalling" ] || return 75
   role=$(process_doh_role_for_slot "$slot") || return
-  process_background_capable || return
-  process_doh_binary_validate >/dev/null || return
+  process_background_capable || {
+    result=$?
+    runtime_log_event error process doh_no_background \
+      "当前环境无法后台启动进程（码 $result）" || true
+    return "$result"
+  }
+  process_doh_binary_validate >/dev/null || {
+    result=$?
+    runtime_log_event error process doh_binary_invalid \
+      "伴随程序校验失败（码 $result）" || true
+    return "$result"
+  }
   if process_record_load "$role" 2>/dev/null && process_identity_matches_loaded; then return 75; fi
   process_record_remove "$role" || return
+  process_doh_reap_orphan_companions || return
   mkdir -p "$(process_doh_dir)" "$RULE_RUNTIME/ready" || return 73
   chmod 700 "$(process_doh_dir)" || return 74
   ready_file=$(process_doh_ready_file "$slot" "$transition") || return
@@ -873,6 +1024,8 @@ process_start_doh_locked() {
     sleep 0.05
   done
   if ! process_cmdline_is_doh_supervisor "$child" || ! process_identity_capture "$child"; then
+    runtime_log_event error process doh_supervisor_vanished \
+      "监护进程启动后无法确认身份：槽位 $slot，pid $child" || true
     process_doh_mark_stop "$role" "$transition" || true
     process_record_remove "$role"
     return 69
@@ -903,7 +1056,13 @@ process_start_doh_locked() {
   fi
   process_doh_wait_ready "$role" "$slot" "$transition" "$ready_file"
   result=$?
-  [ "$result" -eq 0 ] && return 0
+  if [ "$result" -eq 0 ]; then
+    runtime_log_event info process doh_started \
+      "伴随进程已就绪：槽位 $slot，pid $child" || true
+    return 0
+  fi
+  runtime_log_event error process doh_not_ready \
+    "伴随进程未能就绪（码 $result）：槽位 $slot，pid $child" || true
   process_doh_mark_stop "$role" "$transition" || true
   process_stop_captured_identity "$child" "$captured_start" "$captured_pgid" "$captured_sid" \
     "$captured_sha" "$captured_cwd" "$captured_exe" "$captured_ns" || true
@@ -926,7 +1085,7 @@ process_start_doh() {
 
 process_stop_doh_locked() {
   [ "$#" -eq 1 ] || return 64
-  local slot=$1 role transition=none result file ready
+  local slot=$1 role transition=none result file ready pid pgid attempt
   process_doh_slot_valid "$slot" || return
   role=$(process_doh_role_for_slot "$slot") || return
   if ! process_record_load "$role" 2>/dev/null; then
@@ -935,8 +1094,43 @@ process_stop_doh_locked() {
   fi
   transition=$(process_doh_slot_transition "$slot" 2>/dev/null || printf 'none')
   process_doh_mark_stop "$role" "$transition" || return
+  # Capture the identity before stopping: process_stop_locked removes the record,
+  # so reading it afterwards would find nothing to escalate against.
+  pid=$PROCESS_PID
+  pgid=$PROCESS_RECORDED_PGID
   process_stop_locked "$role"
   result=$?
+
+  # A supervisor that refuses the graceful stop keeps its companion alive, and
+  # that companion still owns the slot's listen port. Reporting success here
+  # while the port stays bound is what makes the *next* enable fail: a fresh
+  # enable always targets slot a, so it tries to bind the port the orphan holds
+  # and the companion exits before it can signal readiness. Escalate to the
+  # process group, then confirm the process is actually gone -- never assume it.
+  if [ "$result" -ne 0 ]; then
+    case "$pid" in ''|-|*[!0-9]*) pid= ;; esac
+    case "$pgid" in ''|-|*[!0-9]*) pgid= ;; esac
+    [ -z "$pgid" ] || kill -9 "-$pgid" 2>/dev/null || true
+    [ -z "$pid" ] || kill -9 "$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+      attempt=0
+      while [ "$attempt" -lt 30 ]; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+        attempt=$((attempt + 1))
+      done
+      # Still alive after SIGKILL: the caller must see the failure, not a lie.
+      if kill -0 "$pid" 2>/dev/null; then
+        return "$result"
+      fi
+    elif [ -z "$pgid" ]; then
+      # Nothing identifiable to escalate against; surface the original failure.
+      return "$result"
+    fi
+    process_record_remove "$role" || return 74
+    result=0
+  fi
+
   [ "$result" -eq 0 ] || return "$result"
   file=$(process_doh_slot_file "$slot") || return
   rm -f "$file" "$(process_doh_generic_stop_marker_path "$role")"
@@ -954,6 +1148,21 @@ process_stop_doh() {
   process_doh_slot_valid "$slot" || return
   rules_lock_acquire process || return
   process_stop_doh_locked "$slot"
+  result=$?
+  rules_lock_release process || return
+  return "$result"
+}
+
+# Forced teardown needs a way to remove a companion that outlived its supervisor.
+# It goes through the same identity-checked reap the start path uses -- matching
+# on the module's own binary and on the absence of a slot record claiming the pid
+# -- so it can never signal an unrelated process that merely shares a name, and
+# it cannot tear down the peer slot during an A/B swap.
+process_reap_doh_orphans() {
+  [ "$#" -eq 0 ] || return 64
+  local result
+  rules_lock_acquire process || return
+  process_doh_reap_orphan_companions
   result=$?
   rules_lock_release process || return
   return "$result"
@@ -1198,6 +1407,7 @@ process_dispatch() {
     start) [ "$#" -eq 2 ] || return 64; process_start_role_valid "$2" || return 64; process_start_managed "$2" ;;
     start-doh) [ "$#" -eq 4 ] || return 64; process_start_doh "$2" "$3" "$4" ;;
     stop-doh) [ "$#" -eq 2 ] || return 64; process_stop_doh "$2" ;;
+    reap-doh-orphans) [ "$#" -eq 1 ] || return 64; process_reap_doh_orphans ;;
     start-ready)
       [ "$#" -eq 3 ] && [ "$2" = history-reader ] || return 64
       process_history_map_token_valid "$3" || return 65

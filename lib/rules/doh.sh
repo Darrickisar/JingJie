@@ -619,10 +619,17 @@ doh_bootstrap() {
     [ -f "$DOH_TX_MARKER" ] && [ ! -L "$DOH_TX_MARKER" ] || return 65
     doh_transaction_restore || return
   fi
+  # 检查配置文件是否存在且有效
   if [ -e "$DOH_CONFIG_STATE" ] || [ -L "$DOH_CONFIG_STATE" ] || [ -e "$DOH_CONFIG_ENDPOINT" ] || [ -L "$DOH_CONFIG_ENDPOINT" ] || [ -e "$DOH_CONFIG_UIDS" ] || [ -L "$DOH_CONFIG_UIDS" ]; then
-    doh_triplet_validate "$DOH_CONFIG_STATE" "$DOH_CONFIG_ENDPOINT" "$DOH_CONFIG_UIDS"
-    return
+    # 如果配置文件存在，尝试验证
+    if doh_triplet_validate "$DOH_CONFIG_STATE" "$DOH_CONFIG_ENDPOINT" "$DOH_CONFIG_UIDS" 2>/dev/null; then
+      # 验证成功，直接返回
+      return 0
+    fi
+    # 验证失败，清理损坏的配置文件，继续创建新的默认配置
+    rm -f "$DOH_CONFIG_STATE" "$DOH_CONFIG_ENDPOINT" "$DOH_CONFIG_UIDS"
   fi
+  # 创建默认的 off 状态配置
   state_tmp="$RULE_TMP/doh-bootstrap-state.$$"
   endpoint_tmp="$RULE_TMP/doh-bootstrap-endpoint.$$"
   uids_tmp="$RULE_TMP/doh-bootstrap-uids.$$"
@@ -638,7 +645,7 @@ doh_bootstrap() {
 }
 
 doh_status_json() {
-  local desired effective fingerprint count error error_json endpoint_configured companion firewall coverage
+  local desired effective fingerprint count error error_json endpoint_configured companion firewall coverage endpoint endpoint_json
   doh_bootstrap || return
   desired=$("$BB" awk -F= '$1=="desired_mode"{print $2}' "$DOH_CONFIG_STATE") || return 74
   effective=$("$BB" awk -F= '$1=="effective_mode"{print $2}' "$DOH_CONFIG_STATE") || return 74
@@ -654,8 +661,17 @@ doh_status_json() {
   [ -s "$DOH_CONFIG_ENDPOINT" ] && endpoint_configured=true || endpoint_configured=false
   [ "$fingerprint" = null ] && fingerprint=null || fingerprint='"'"$fingerprint"'"'
   [ "$error" = null ] && error_json=null || error_json='"'"$error"'"'
-  printf '{"supported":true,"modes":["off","global","selected"],"desiredMode":"%s","effectiveMode":"%s","endpointConfigured":%s,"endpointFingerprint":%s,"selectedUidCount":%s,"companionState":"%s","firewallState":"%s","coverage":"%s","lastError":%s}\n' \
-    "$desired" "$effective" "$endpoint_configured" "$fingerprint" "$count" "$companion" "$firewall" "$coverage" "$error_json"
+  # The endpoint is returned so the WebUI can prefill its input instead of making
+  # the address be retyped on every re-enable. Only a committed, still-valid
+  # endpoint is echoed; anything unparseable is reported as absent rather than
+  # emitted raw. Callers must keep treating this as user-supplied data.
+  endpoint_json=null
+  if [ -s "$DOH_CONFIG_ENDPOINT" ] && doh_endpoint_validate_file "$DOH_CONFIG_ENDPOINT" 2>/dev/null; then
+    endpoint=$(cat "$DOH_CONFIG_ENDPOINT") || return 74
+    endpoint_json='"'"$(printf '%s' "$endpoint" | json_escape)"'"'
+  fi
+  printf '{"supported":true,"modes":["off","global","selected"],"desiredMode":"%s","effectiveMode":"%s","endpointConfigured":%s,"endpointFingerprint":%s,"endpoint":%s,"selectedUidCount":%s,"companionState":"%s","firewallState":"%s","coverage":"%s","lastError":%s}\n' \
+    "$desired" "$effective" "$endpoint_configured" "$fingerprint" "$endpoint_json" "$count" "$companion" "$firewall" "$coverage" "$error_json"
 }
 
 doh_apply() {
@@ -686,7 +702,19 @@ doh_disable() {
   state_tmp="$RULE_TMP/doh-disable-state.$$"
   endpoint_tmp="$RULE_TMP/doh-disable-endpoint.$$"
   uids_tmp="$RULE_TMP/doh-disable-uids.$$"
-  : > "$endpoint_tmp" && : > "$uids_tmp" || { rm -f "$endpoint_tmp" "$uids_tmp"; return 74; }
+  # Turning encrypted DNS off used to blank the endpoint, which meant the address
+  # had to be retyped on every re-enable. Carry the committed endpoint forward
+  # instead: desired_mode=off already stops every runtime path from using it, and
+  # doh_state_write recomputes the hash and fingerprint from whatever it is given,
+  # so the triplet stays internally consistent either way. The uid list is still
+  # cleared -- an off state has no selected apps, and a stale list would fail the
+  # "global mode must have an empty uid file" check on the next enable.
+  if [ -s "$DOH_CONFIG_ENDPOINT" ] && doh_endpoint_validate_file "$DOH_CONFIG_ENDPOINT" 2>/dev/null; then
+    cp "$DOH_CONFIG_ENDPOINT" "$endpoint_tmp" || { rm -f "$endpoint_tmp"; return 74; }
+  else
+    : > "$endpoint_tmp" || { rm -f "$endpoint_tmp"; return 74; }
+  fi
+  : > "$uids_tmp" || { rm -f "$endpoint_tmp" "$uids_tmp"; return 74; }
   chmod 600 "$endpoint_tmp" "$uids_tmp" || { rm -f "$endpoint_tmp" "$uids_tmp"; return 74; }
   now=$(date +%s 2>/dev/null || printf 0)
   doh_state_write off "$endpoint_tmp" "$uids_tmp" null "$now" "$state_tmp" || {

@@ -38,6 +38,10 @@ process_stop_doh() {
   "$SYSTEM_SH" "$MODDIR/process_manager.sh" stop-doh "$@"
 }
 
+process_reap_doh_orphans() {
+  "$SYSTEM_SH" "$MODDIR/process_manager.sh" reap-doh-orphans
+}
+
 firewall_doh_stage() {
   "$SYSTEM_SH" "$MODDIR/firewall_manager.sh" doh-stage "$@"
 }
@@ -56,6 +60,10 @@ firewall_doh_remove_owned() {
 
 firewall_doh_detach_owned() {
   "$SYSTEM_SH" "$MODDIR/firewall_manager.sh" doh-detach-owned "$@"
+}
+
+firewall_doh_force_cleanup() {
+  "$SYSTEM_SH" "$MODDIR/firewall_manager.sh" doh-force-cleanup "$@"
 }
 
 firewall_doh_cleanup_owned() {
@@ -82,6 +90,7 @@ doh_manager_set_error() {
 doh_stage_set() {
   DOH_FAILURE_STAGE=$1
   export DOH_FAILURE_STAGE
+  runtime_log_event info doh "stage_$1" "进入阶段 $1" || true
 }
 
 doh_manager_error_for() {
@@ -93,6 +102,7 @@ doh_manager_error_for() {
     package_state:66|package_state:67) error=package_state_invalid ;;
     bootstrap:69) error=bootstrap_unresolved ;;
     firewall:69) error=firewall_unsupported ;;
+    switch:69) error=firewall_unsupported ;;
     companion:*) error=companion_unavailable ;;
     companion_start:*) error=companion_exited ;;
     probe:*) error=upstream_unavailable ;;
@@ -107,6 +117,21 @@ doh_manager_error_for() {
     esac
   fi
   doh_error_valid "$error" || error=$fallback
+  # error 级别无条件写盘，开关关掉也写：这条就是用户看到“加密 DNS 运行失败”时
+  # 唯一能反查阶段与退出码的记录。
+  runtime_log_event error doh "${stage}_failed" \
+    "阶段 $stage 失败，退出码 $code，判定为 $error" || true
+  # 把失败阶段、退出码与映射后的错误落盘，便于事后定位真正的失败点。
+  # runtime.prop 的字段是严格校验的，所以另写一个诊断文件，不影响任何状态机。
+  if [ -n "${DOH_RUNTIME_DIR-}" ] && [ -d "$DOH_RUNTIME_DIR" ]; then
+    {
+      printf 'stage=%s\n' "$stage"
+      printf 'exit_code=%s\n' "$code"
+      printf 'error=%s\n' "$error"
+      printf 'at=%s\n' "$(date +%s 2>/dev/null || printf 0)"
+    } > "$DOH_RUNTIME_DIR/last-failure.prop" 2>/dev/null || true
+    chmod 600 "$DOH_RUNTIME_DIR/last-failure.prop" 2>/dev/null || true
+  fi
   printf '%s\n' "$error"
 }
 
@@ -339,11 +364,21 @@ doh_config_prepare() {
   chmod 600 "$output" || { rm -f "$output"; return 74; }
 }
 
+# companion 自己的报错原来整个进了 /dev/null，探测失败时真机上查不到任何原因。
+# 现在把 stderr 收进运行日志再丢弃临时文件，退出码与行为保持不变。
 doh_probe() {
   [ "$#" -eq 1 ] || return 64
-  local config_file=$1
+  local config_file=$1 err result
   [ -f "$config_file" ] && [ ! -L "$config_file" ] || return 66
-  "$DOH_COMPANION_TARGET" probe --config-fd 3 3<"$config_file" >/dev/null 2>&1
+  err="$RULE_TMP/doh-probe-err.$$"
+  "$DOH_COMPANION_TARGET" probe --config-fd 3 3<"$config_file" >/dev/null 2>"$err"
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    runtime_log_event error doh probe_failed \
+      "探测失败，退出码 $result：$("$BB" head -c 512 "$err" 2>/dev/null | "$BB" tr '\n' ' ')" || true
+  fi
+  rm -f "$err"
+  return "$result"
 }
 
 doh_commit_effective() {
@@ -506,6 +541,9 @@ doh_manager_activate() {
     doh_activation_compensate "$slot" "$transition" 1 runtime_failed
     return 74
   }
+  # 切换是独立一步：原来它失败时阶段仍标着 firewall，而映射只认 firewall:69，
+  # 其余退出码全落回 runtime_failed，真正卡在切换还是布规则分不出来。
+  doh_stage_set switch
   firewall_doh_switch "$transition"
   result=$?
   if [ "$result" -ne 0 ]; then
@@ -519,6 +557,8 @@ doh_manager_activate() {
     return "$result"
   }
   DOH_ACTIVATION_COMMITTED=1
+  runtime_log_event info doh activated \
+    "加密 DNS 已启用：模式 $mode，槽位 $slot，端口 $port" || true
   if [ "$old_slot" != null ] && [ "$old_slot" != "$slot" ]; then
     process_stop_doh "$old_slot" || return
   fi
@@ -618,11 +658,12 @@ doh_manager_force_disable_runtime() {
   process_stop_doh a 2>/dev/null || true
   process_stop_doh b 2>/dev/null || true
 
-  # 2. 强制 kill 残留进程
-  pkill -9 jingjie_doh_proxy 2>/dev/null || true
+  # 2. 清理仍在运行的残留伴随进程：按 pid 与二进制身份匹配，且跳过仍被 slot
+  #    记录认领的进程，绝不按进程名杀（同名的无关进程会被误杀）。
+  process_reap_doh_orphans 2>/dev/null || true
 
   # 3. 强制清理防火墙规则
-  sh "$MODDIR/firewall_manager.sh" doh-force-cleanup 2>/dev/null || true
+  firewall_doh_force_cleanup 2>/dev/null || true
 
   # 4. 删除所有 DoH 清单文件
   rm -f "$DOH_RUNTIME_DIR/"firewall-*.tsv 2>/dev/null || true
@@ -650,23 +691,49 @@ doh_manager_disable_runtime_enhanced() {
     case "$token" in *[!0-9a-f]*) return 65 ;; esac
   fi
 
+  runtime_log_event info doh disable_begin "开始关闭，事务令牌 $token" || true
+
   # 尝试正常关闭，失败则降级到宽松模式
   result=0
-  [ "$token" = null ] || firewall_doh_detach_owned "$token" 2>/dev/null || result=$?
+  if [ "$token" != null ]; then
+    firewall_doh_detach_owned "$token" 2>/dev/null || {
+      result=$?
+      runtime_log_event error doh disable_detach_failed \
+        "摘除 OUTPUT 转发失败（码 $result），将走强制清理" || true
+    }
+  fi
 
   # 无论 detach 是否成功，都尝试停止进程
   process_stop_doh a 2>/dev/null || true
   process_stop_doh b 2>/dev/null || true
 
-  # 尝试 cleanup，即使失败也继续
-  [ "$token" = null ] || firewall_doh_cleanup_owned "$token" 2>/dev/null || true
+  # cleanup 失败绝不能当作没发生：它一旦失败，清单就带着 active
+  # 状态留在盘上，槽位链 JJD4_A/JJD6_A 也留在内核里。下一次启用固定
+  # 从槽位 A 开始，stage 碰上已存在的链直接返回 76，用户看到的就是
+  # “启用加密 DNS 未完成：加密 DNS 运行失败”。记下失败，让下面走强制清理。
+  if [ "$token" != null ]; then
+    firewall_doh_cleanup_owned "$token" 2>/dev/null || {
+      result=$?
+      runtime_log_event error doh disable_cleanup_failed \
+        "回收防火墙链与清单失败（码 $result），将走强制清理" || true
+    }
+  fi
 
   # 如果还有残留，使用强制清理
   if [ "$result" -ne 0 ] || ! doh_commit_disabled 2>/dev/null; then
+    runtime_log_event error doh disable_degraded \
+      "常规关闭未走完（码 $result），降级为强制清理" || true
     doh_manager_force_disable_runtime
-    return $?
+    result=$?
+    if [ "$result" -eq 0 ]; then
+      runtime_log_event info doh disable_forced_ok "强制清理完成，已回到关闭状态" || true
+    else
+      runtime_log_event error doh disable_forced_failed "强制清理也失败了（码 $result）" || true
+    fi
+    return "$result"
   fi
 
+  runtime_log_event info doh disable_ok "关闭完成，防火墙链与清单均已回收" || true
   return 0
 }
 
@@ -723,6 +790,15 @@ doh_manager_disable() {
 
     # 成功则返回
     if [ "$result" -eq 0 ]; then
+      # 新增：成功后等待一下，确保资源完全释放
+      sleep 0.5
+
+      # 新增：关闭 DoH 后自动刷新规则（重新挂载 hosts）
+      # 因为 DoH 关闭后，需要确保 hosts 文件重新生效
+      if [ -f "$MODDIR/rule_engine.sh" ]; then
+        sh "$MODDIR/rule_engine.sh" remount 2>/dev/null || true
+      fi
+
       return 0
     fi
 

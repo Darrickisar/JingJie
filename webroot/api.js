@@ -112,6 +112,9 @@ function validateArgs(verb, args) {
     case 'rules-bundle':
     case 'notice-status':
     case 'log-mode':
+    case 'runtime-log-mode':
+    case 'clear-runtime-logs':
+    case 'export-runtime-logs':
     case 'ui-theme':
     case 'app-capability':
     case 'app-policy':
@@ -280,7 +283,8 @@ function validateArgs(verb, args) {
       listEncoded(args[1]);
       listEncoded(args[2]);
       break;
-    case 'logs': {
+    case 'logs':
+    case 'runtime-logs': {
       count(2);
       if (!CURSOR.test(args[0])) invalid('invalid log cursor');
       const maxBytes = Number(args[1]);
@@ -289,6 +293,10 @@ function validateArgs(verb, args) {
       }
       break;
     }
+    case 'set-runtime-log-mode':
+      count(1);
+      boolean(args[0]);
+      break;
     default:
       invalid('unsupported API verb');
   }

@@ -1091,7 +1091,7 @@ h3 {
 .panel-heading {
   min-height: 56px;
   margin-bottom: 14px;
-  padding: 0 2px 12px;
+  padding: 0 4px 12px 6px;
   border-bottom: 1px solid var(--line-strong);
 }
 
@@ -1422,8 +1422,10 @@ h3 {
   display: grid;
   grid-template-columns: minmax(0, 1.24fr) minmax(310px, 0.76fr);
   align-items: stretch;
-  gap: 14px;
-  margin-top: 14px;
+  gap: var(--space-5);
+  /* 卡片间距统一用 --space-5(20px)：卡片圆角是 --radius-panel(20px)，间距比圆角
+     还小时相邻卡片的圆角会在视觉上连成一片，分区边界就糊掉了。 */
+  margin-top: var(--space-5);
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -2305,7 +2307,7 @@ dialog input[aria-invalid] {
 
 .rule-log-view {
   min-width: 0;
-  margin-top: 14px;
+  margin-top: var(--space-5);
   padding: 18px;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -2334,6 +2336,70 @@ dialog input[aria-invalid] {
 
 .rule-log-heading p {
   margin-top: 4px;
+}
+
+/* 三个日志分区的标题统一带一个图示，便于在同一页里快速区分。 */
+
+.rule-log-heading h3,
+.log-section-heading h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rule-log-heading h3 svg,
+.log-section-heading h3 svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--accent-strong, currentColor);
+}
+
+/* 拦截历史卡片自身没有内边距，它的内容从 .history-status-rail 的 16px 18px
+   开始。标题若不跟着缩进，就会贴在卡片左上角，和下面的内容对不齐。 */
+
+.log-section-heading {
+  margin: 0;
+  padding: 18px 18px 0;
+}
+
+/* 运行日志的开关与清空并排，和拦截历史那条状态轨对齐。 */
+
+.runtime-log-rail {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-subtle) 70%, transparent);
+}
+
+.runtime-log-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.runtime-log-export-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 620;
+  overflow-wrap: anywhere;
+}
+
+/* 三个日志分区之间的分隔线，也用于把危险区域和日志输出推开。 */
+
+.section-divider {
+  height: 1px;
+  margin: 22px 0 0;
+  border: 0;
+  background: var(--line);
 }
 
 .log-output {
@@ -3435,7 +3501,7 @@ dialog form {
   min-width: 0;
   display: grid;
   gap: 14px;
-  margin-bottom: 14px;
+  margin-bottom: var(--space-5);
   padding: clamp(18px, 3vw, 28px);
   overflow: hidden;
   border: 1px solid var(--line);
@@ -3664,17 +3730,7 @@ dialog form {
   display: grid;
 }
 
-.maintenance-strip {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 14px;
-  margin-bottom: 14px;
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
-}
+/* 运行设置的控件已并入规则日志卡片，不再是独立分区，所以只保留栅格本身。 */
 
 .maintenance-controls {
   min-width: 0;
@@ -3682,9 +3738,12 @@ dialog form {
   grid-template-columns: minmax(200px, 1fr) repeat(2, auto);
   gap: 10px;
   align-items: end;
+  margin-bottom: 14px;
 }
 
-/* 危险区域：独立低饱和红色分区 */
+/* 危险区域：独立低饱和红色分区。
+   它现在位于规则日志卡片内部、紧跟日志输出之后，所以要用一条分隔线和明确的
+   上间距把它推开——挨着日志框会让“重置规则配置”看着像日志的一部分。 */
 
 .danger-zone {
   min-width: 0;
@@ -3692,6 +3751,7 @@ dialog form {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
+  margin-top: 16px;
   padding: 14px;
   border: 1px solid var(--danger-line);
   border-radius: var(--radius-md);
@@ -3768,7 +3828,11 @@ dialog form {
   overflow-wrap: anywhere;
 }
 
-.maintenance-strip label {
+/* 运行设置的控件并入规则日志卡片后，选择器要跟着走：原来这两条挂在
+   .maintenance-strip 上，那个类已经不存在，于是日志档位下拉框退回成了浏览器
+   原生控件——没有描边、没有圆角，在卡片里显得格外突兀。 */
+
+.maintenance-controls label {
   min-width: 0;
   display: grid;
   gap: 6px;
@@ -3777,14 +3841,35 @@ dialog form {
   font-weight: 700;
 }
 
-.maintenance-strip select {
+.maintenance-controls select {
   min-height: 44px;
-  padding: 0 10px;
+  padding: 0 34px 0 12px;
   border: 1px solid var(--control-line-strong);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   color: var(--ink);
-  background: var(--surface-raised);
+  background: var(--surface-subtle);
+  box-shadow: inset 0 1px 0 rgba(16, 23, 19, 0.02);
   font: inherit;
+  font-weight: 650;
+  /* 原生箭头在深色主题下是系统色，和卡片对不上；换成跟文字同色的自绘箭头。 */
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 18px) calc(50% - 2px), calc(100% - 13px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.maintenance-controls select:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--control-line-strong) 70%, var(--ink));
+  background-color: var(--surface);
+}
+
+.maintenance-controls select:focus {
+  border-color: var(--accent);
+  background-color: var(--surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 13%, transparent);
+  outline: 0;
 }
 
 .app-policy-controls select {
@@ -3890,10 +3975,6 @@ dialog form {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .maintenance-strip {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .maintenance-controls {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
@@ -3915,6 +3996,20 @@ dialog form {
 
   .rule-log-heading .button,
   .notice-readonly .button {
+    width: 100%;
+  }
+
+  .runtime-log-rail {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .runtime-log-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .runtime-log-actions .button {
     width: 100%;
   }
 

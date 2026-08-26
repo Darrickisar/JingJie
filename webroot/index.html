@@ -386,45 +386,13 @@
 
         <section class="tab-panel" id="panel-logs" role="tabpanel" aria-labelledby="tab-logs" hidden>
           <div class="panel-heading">
-            <h2 id="history-panel-heading">拦截历史</h2>
+            <h2 id="logs-panel-heading">日志</h2>
           </div>
 
-          <section class="maintenance-strip" id="maintenance-strip" aria-labelledby="maintenance-heading" data-liquid-surface>
-            <div class="section-heading">
-              <h3 id="maintenance-heading">运行设置</h3>
-              <button class="icon-button section-toggle" type="button" aria-controls="maintenance-body" data-collapse-label="运行设置" aria-expanded="true" aria-label="收起运行设置" title="收起运行设置">
-                <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
-              </button>
-            </div>
-            <div class="collapsible-body maintenance-body" id="maintenance-body">
-            <div class="maintenance-controls">
-              <label for="log-mode-select">
-                <span>日志档位</span>
-                <select id="log-mode-select" disabled>
-                  <option value="off">关闭额外日志</option>
-                  <option value="blocked_error">仅拦截与错误</option>
-                  <option value="all">全部模块事件</option>
-                </select>
-              </label>
-              <button class="button button-secondary write-action" id="save-log-mode-button" type="button" disabled>保存日志档位</button>
-              <button class="button button-secondary" id="diagnostics-button" type="button" disabled>
-                <i data-lucide="gauge" aria-hidden="true"></i>
-                <span>环境检查</span>
-              </button>
-            </div>
-            <div class="danger-zone" id="danger-zone">
-              <div class="danger-zone-copy">
-                <strong><i data-lucide="triangle-alert" aria-hidden="true"></i>危险区域</strong>
-                <span>重置会清空手工名单与域名覆写，并恢复内置规则来源。</span>
-              </div>
-              <button class="button button-danger write-action" id="reset-rules-button" type="button" disabled>重置规则配置</button>
-            </div>
-            </div>
-          </section>
-
-          <section class="diagnostics-result" id="diagnostics-result" aria-live="polite" aria-busy="false" hidden></section>
-
           <section class="history-view" id="history-view" aria-labelledby="history-panel-heading" data-liquid-surface>
+            <div class="section-heading log-section-heading">
+              <h3 id="history-panel-heading"><i data-lucide="history" aria-hidden="true"></i>拦截历史</h3>
+            </div>
             <div class="history-status-rail" id="history-status-rail" data-tone="neutral">
               <div>
                 <div class="history-status-title-line">
@@ -496,7 +464,7 @@
           <section class="rule-log-view" id="rule-log-view" aria-labelledby="rule-log-heading" aria-busy="false" data-liquid-surface>
             <div class="rule-log-heading">
               <div>
-                <h3 id="rule-log-heading">规则日志</h3>
+                <h3 id="rule-log-heading"><i data-lucide="scroll-text" aria-hidden="true"></i>规则日志</h3>
                 <p class="muted">仅在你手动载入时读取规则引擎文本记录，不会后台轮询。日志档位选「全部模块事件」后，每次刷新的放行与拦截明细都写在这里。</p>
               </div>
               <button class="button button-secondary" id="reload-logs-button" type="button">
@@ -508,8 +476,73 @@
               </button>
             </div>
             <div class="collapsible-body" id="rule-log-body">
+              <div class="maintenance-controls" id="maintenance-strip">
+                <label for="log-mode-select">
+                  <span>日志档位</span>
+                  <select id="log-mode-select" disabled>
+                    <option value="off">关闭额外日志</option>
+                    <option value="blocked_error">仅拦截与错误</option>
+                    <option value="all">全部模块事件</option>
+                  </select>
+                </label>
+                <button class="button button-secondary write-action" id="save-log-mode-button" type="button" disabled>保存日志档位</button>
+                <button class="button button-secondary" id="diagnostics-button" type="button" disabled>
+                  <i data-lucide="gauge" aria-hidden="true"></i>
+                  <span>环境检查</span>
+                </button>
+              </div>
+              <section class="diagnostics-result" id="diagnostics-result" aria-live="polite" aria-busy="false" hidden></section>
               <pre class="log-output" id="log-output" tabindex="0">尚未载入规则日志</pre>
               <button class="button button-secondary load-more" id="load-more-logs" type="button" hidden>加载更多规则日志</button>
+              <hr class="section-divider">
+              <div class="danger-zone" id="danger-zone">
+                <div class="danger-zone-copy">
+                  <strong><i data-lucide="triangle-alert" aria-hidden="true"></i>危险区域</strong>
+                  <span>重置会清空手工名单与域名覆写，并恢复内置规则来源。</span>
+                </div>
+                <button class="button button-danger write-action" id="reset-rules-button" type="button" disabled>重置规则配置</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="rule-log-view runtime-log-view" id="runtime-log-view" aria-labelledby="runtime-log-heading" aria-busy="false" data-liquid-surface>
+            <div class="rule-log-heading">
+              <div>
+                <h3 id="runtime-log-heading"><i data-lucide="monitor" aria-hidden="true"></i>运行日志</h3>
+                <p class="muted">记录加密 DNS、防火墙、伴随进程等各功能的运行过程与失败原因，用来定位「某个功能开不起来」到底卡在哪一步。失败记录始终写入，关闭开关只停掉每步成功的明细。</p>
+              </div>
+              <button class="button button-secondary" id="reload-runtime-logs-button" type="button">
+                <i data-lucide="monitor" aria-hidden="true"></i>
+                <span>载入运行日志</span>
+              </button>
+              <button class="icon-button section-toggle" type="button" aria-controls="runtime-log-body" data-collapse-label="运行日志" aria-expanded="true" aria-label="收起运行日志" title="收起运行日志">
+                <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
+              </button>
+            </div>
+            <div class="collapsible-body" id="runtime-log-body">
+              <div class="runtime-log-rail">
+                <label class="switch-label" for="runtime-log-enabled">
+                  <input class="source-switch write-action" id="runtime-log-enabled" type="checkbox" role="switch" aria-label="记录运行日志" disabled>
+                  <span class="source-toggle" aria-hidden="true">
+                    <span class="source-toggle-box"></span>
+                    <span class="source-toggle-label source-toggle-off">仅失败</span>
+                    <span class="source-toggle-label source-toggle-on">全过程</span>
+                  </span>
+                </label>
+                <div class="runtime-log-actions">
+                  <button class="button button-secondary" id="export-runtime-logs-button" type="button" disabled>
+                    <i data-lucide="save" aria-hidden="true"></i>
+                    <span>导出到文件</span>
+                  </button>
+                  <button class="button button-secondary write-action" id="clear-runtime-logs-button" type="button" disabled>
+                    <i data-lucide="trash-2" aria-hidden="true"></i>
+                    <span>清空</span>
+                  </button>
+                </div>
+              </div>
+              <p class="runtime-log-export-note" id="runtime-log-export-note" aria-live="polite" hidden></p>
+              <pre class="log-output" id="runtime-log-output" tabindex="0">尚未载入运行日志</pre>
+              <button class="button button-secondary load-more" id="load-more-runtime-logs" type="button" hidden>加载更多运行日志</button>
             </div>
           </section>
         </section>
@@ -775,7 +808,7 @@
           </button>
           <button class="tab-button" id="tab-logs" type="button" role="tab" aria-selected="false" aria-controls="panel-logs" tabindex="-1">
             <i data-lucide="scroll-text" aria-hidden="true"></i>
-            <span>日志<small class="tab-alias">运行日志</small></span>
+            <span>日志</span>
           </button>
           <button class="tab-button" id="tab-settings" type="button" role="tab" aria-selected="false" aria-controls="panel-settings" tabindex="-1">
             <i data-lucide="settings" aria-hidden="true"></i>

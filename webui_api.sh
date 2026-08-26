@@ -77,21 +77,68 @@ api_history_args_valid() {
   api_history_domain_arg_valid "$6"
 }
 
-api_logs_data() {
-  local cursor=$1 max=$2 size start text next
+# 按游标分页读取任意日志文件；规则日志与运行日志共用。
+api_log_file_data() {
+  local file=$1 cursor=$2 max=$3 size start text next
   api_uint_valid "$cursor" && api_uint_valid "$max" || return 65
   [ "$max" -ge 1024 ] 2>/dev/null && [ "$max" -le 32768 ] 2>/dev/null || return 65
-  if [ ! -f "$RULE_LOG" ]; then
+  if [ ! -f "$file" ]; then
     printf '{"cursor":0,"nextCursor":0,"text":""}\n'
     return 0
   fi
-  size=$("$BB" wc -c < "$RULE_LOG" | "$BB" tr -d ' ') || return 74
+  size=$("$BB" wc -c < "$file" | "$BB" tr -d ' ') || return 74
   [ "$cursor" -le "$size" ] 2>/dev/null || cursor=$size
   start=$((cursor + 1))
-  text=$("$BB" tail -c "+$start" "$RULE_LOG" | "$BB" head -c "$max" | json_escape) || return 74
+  text=$("$BB" tail -c "+$start" "$file" | "$BB" head -c "$max" | json_escape) || return 74
   next=$((cursor + max))
   [ "$next" -le "$size" ] || next=$size
   printf '{"cursor":%s,"nextCursor":%s,"text":"%s"}\n' "$cursor" "$next" "$text"
+}
+
+api_logs_data() {
+  api_log_file_data "$RULE_LOG" "$1" "$2"
+}
+
+api_runtime_logs_data() {
+  api_log_file_data "$RUNTIME_LOG" "$1" "$2"
+}
+
+# 只清运行日志本体与它的轮转代，不碰规则日志。
+api_runtime_logs_clear() {
+  rm -f "$RUNTIME_LOG" "$RUNTIME_LOG.1" "$RUNTIME_LOG.2" || return 74
+  printf '{"cleared":true}\n'
+}
+
+# 导出目录白名单，与相册那套同源。测试可以覆写。
+RUNTIME_LOG_EXPORT_ROOTS=${RUNTIME_LOG_EXPORT_ROOTS:-"/sdcard/Download /storage/emulated/0/Download /sdcard /storage/emulated/0"}
+
+# 把运行日志（含轮转代，按时间从旧到新）导出成一个纯文本文件。
+#
+# 目的地由这里自己挑，WebUI 一个参数都不传：路径不经过前端，就没有可注入的面。
+api_runtime_logs_export() {
+  local root dest name tmp bytes
+  [ -f "$RUNTIME_LOG" ] || [ -f "$RUNTIME_LOG.1" ] || [ -f "$RUNTIME_LOG.2" ] || return 66
+  name="jingjie-runtime-log-$(date +%Y%m%d-%H%M%S 2>/dev/null || printf 'export').txt"
+  dest=
+  for root in $RUNTIME_LOG_EXPORT_ROOTS; do
+    [ -d "$root" ] || continue
+    tmp="$root/.jingjie-write-test.$$"
+    if : > "$tmp" 2>/dev/null; then
+      rm -f "$tmp"
+      dest="$root/$name"
+      break
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+  done
+  [ -n "$dest" ] || return 73
+  # 轮转代是越旧编号越大，所以 .2 -> .1 -> 当前，导出后按时间顺序可读。
+  {
+    [ ! -f "$RUNTIME_LOG.2" ] || cat "$RUNTIME_LOG.2"
+    [ ! -f "$RUNTIME_LOG.1" ] || cat "$RUNTIME_LOG.1"
+    [ ! -f "$RUNTIME_LOG" ] || cat "$RUNTIME_LOG"
+  } > "$dest" 2>/dev/null || { rm -f "$dest"; return 74; }
+  bytes=$("$BB" wc -c < "$dest" | "$BB" tr -d ' ') || { rm -f "$dest"; return 74; }
+  printf '{"path":"%s","bytes":%s}\n' "$(printf '%s' "$dest" | json_escape)" "$bytes"
 }
 
 api_appearance_file() {
@@ -420,6 +467,21 @@ api_dispatch() {
       data=$(api_logs_data "$2" "$3" 2>/dev/null) || { api_error invalid_argument '参数无效'; return 0; }
       api_ok_data "$data"
       ;;
+    runtime-logs)
+      [ "$#" -eq 3 ] || { api_error invalid_argument '参数无效'; return 0; }
+      data=$(api_runtime_logs_data "$2" "$3" 2>/dev/null) || { api_error invalid_argument '参数无效'; return 0; }
+      api_ok_data "$data"
+      ;;
+    clear-runtime-logs)
+      [ "$#" -eq 1 ] || { api_error invalid_argument '参数无效'; return 0; }
+      data=$(api_runtime_logs_clear 2>/dev/null) || { api_error state_invalid 'state invalid'; return 0; }
+      api_ok_data "$data"
+      ;;
+    export-runtime-logs)
+      [ "$#" -eq 1 ] || { api_error invalid_argument '参数无效'; return 0; }
+      data=$(api_runtime_logs_export 2>/dev/null) || { api_error state_invalid '运行日志导出失败'; return 0; }
+      api_ok_data "$data"
+      ;;
     lists)
       [ "$#" -eq 1 ] || { api_error invalid_argument '参数无效'; return 0; }
       config_bootstrap >/dev/null 2>&1 || { api_error state_invalid 'state invalid'; return 0; }
@@ -517,6 +579,17 @@ api_dispatch() {
     log-mode)
       [ "$#" -eq 1 ] || { api_error invalid_argument '参数无效'; return 0; }
       data=$(preferences_log_mode_json 2>/dev/null) || { api_error state_invalid 'state invalid'; return 0; }
+      api_ok_data "$data"
+      ;;
+    runtime-log-mode)
+      [ "$#" -eq 1 ] || { api_error invalid_argument '参数无效'; return 0; }
+      data=$(preferences_runtime_log_json 2>/dev/null) || { api_error state_invalid 'state invalid'; return 0; }
+      api_ok_data "$data"
+      ;;
+    set-runtime-log-mode)
+      [ "$#" -eq 2 ] || { api_error invalid_argument '参数无效'; return 0; }
+      preferences_set_runtime_log "$2" 2>/dev/null || { api_error invalid_argument '参数无效'; return 0; }
+      data=$(preferences_runtime_log_json 2>/dev/null) || { api_error state_invalid 'state invalid'; return 0; }
       api_ok_data "$data"
       ;;
     app-capability)

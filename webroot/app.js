@@ -194,6 +194,14 @@ const elements = {
   logOutput: document.querySelector('#log-output'),
   reloadLogsButton: document.querySelector('#reload-logs-button'),
   loadMoreLogs: document.querySelector('#load-more-logs'),
+  runtimeLogView: document.querySelector('#runtime-log-view'),
+  runtimeLogOutput: document.querySelector('#runtime-log-output'),
+  reloadRuntimeLogsButton: document.querySelector('#reload-runtime-logs-button'),
+  loadMoreRuntimeLogs: document.querySelector('#load-more-runtime-logs'),
+  runtimeLogEnabled: document.querySelector('#runtime-log-enabled'),
+  clearRuntimeLogsButton: document.querySelector('#clear-runtime-logs-button'),
+  exportRuntimeLogsButton: document.querySelector('#export-runtime-logs-button'),
+  runtimeLogExportNote: document.querySelector('#runtime-log-export-note'),
   clearHistoryDialog: document.querySelector('#clear-history-dialog'),
   clearHistoryForm: document.querySelector('#clear-history-form'),
   noticeDialog: document.querySelector('#notice-dialog'),
@@ -319,6 +327,11 @@ let logCursor = '0';
 let logsLoaded = false;
 let logsLoading = false;
 let logHasContent = false;
+let runtimeLogCursor = '0';
+let runtimeLogsLoaded = false;
+let runtimeLogsLoading = false;
+let runtimeLogHasContent = false;
+let runtimeLogModeLoaded = false;
 let managementUnlocked = false;
 let initialRefreshScheduled = false;
 let backendWatch = null;
@@ -327,6 +340,9 @@ let appPolicyLoaded = false;
 let appPolicyLoading = false;
 let appsPanelActive = false;
 let dohLoaded = false;
+// 用户一旦改过地址框，状态刷新就不再回填，否则 5 秒一次的轮询会把正在输入的
+// 内容覆盖掉（轮询期间输入框会被短暂禁用，焦点也会因此丢失）。
+let dohEndpointDirty = false;
 let dohLoading = false;
 let dohStatus = null;
 let dohAppsLoading = false;
@@ -1494,6 +1510,13 @@ function renderDohStatus(status = {}) {
   elements.dohSelectedRegion.hidden = renderMode !== 'selected';
   elements.dohAppList.hidden = renderMode !== 'selected';
 
+  // 后端会回传已提交的地址，用它回填输入框，避免每次重新启用都要重输。
+  if (typeof status.endpoint === 'string' && status.endpoint
+    && !dohEndpointDirty
+    && elements.dohEndpoint.value !== status.endpoint) {
+    elements.dohEndpoint.value = status.endpoint;
+  }
+
   const selectedUnsupported = supported && !selectedSupported;
   const selectedUnsupportedCopy = selectedUnsupported ? ' · 当前设备不支持所选应用模式' : '';
   if (!supported) {
@@ -1765,6 +1788,8 @@ async function confirmDohEnable() {
     encodeBase64Utf8(config.endpoint),
     encodeBase64Utf8(config.config),
   ]);
+  // 已提交，之后的回填就是这个地址本身，可以重新接受回填。
+  dohEndpointDirty = false;
   dohLoaded = false;
   await loadDohStatus({ force: true });
 }
@@ -1772,7 +1797,8 @@ async function confirmDohEnable() {
 async function disableDoh() {
   if (!managementUnlocked || currentStatus?.busy) return;
   await runMutation('disable-doh');
-  elements.dohEndpoint.value = '';
+  // 地址保留在后端，loadDohStatus 会回填，这里不再清空输入框。
+  dohEndpointDirty = false;
   elements.dohUids.value = '';
   dohLoaded = false;
   await loadDohStatus({ force: true });
@@ -2555,6 +2581,9 @@ function selectTab(tab) {
   if (historyPanelActive && !logModeLoaded && !logModeLoading) {
     afterPanelSettled(tab, () => loadLogMode());
   }
+  if (historyPanelActive && !runtimeLogModeLoaded) {
+    afterPanelSettled(tab, () => loadRuntimeLogMode());
+  }
   if (tab.id === 'tab-sources') {
     afterPanelSettled(tab, () => {
       ensureSourcePanelRendered();
@@ -2730,6 +2759,136 @@ async function loadRuleLogs({ reset = false } = {}) {
     elements.ruleLogView.setAttribute('aria-busy', 'false');
     elements.reloadLogsButton.disabled = false;
     elements.loadMoreLogs.disabled = false;
+  }
+}
+
+async function loadRuntimeLogs({ reset = false } = {}) {
+  if (runtimeLogsLoading || disposed) return;
+  runtimeLogsLoading = true;
+  elements.runtimeLogView.setAttribute('aria-busy', 'true');
+  elements.reloadRuntimeLogsButton.disabled = true;
+  elements.loadMoreRuntimeLogs.disabled = true;
+  if (reset) {
+    runtimeLogCursor = '0';
+    runtimeLogsLoaded = false;
+    runtimeLogHasContent = false;
+    elements.runtimeLogOutput.textContent = '正在载入运行日志…';
+  }
+
+  try {
+    const data = await execApi('runtime-logs', [runtimeLogCursor, '32768']);
+    const text = typeof data?.text === 'string' ? data.text : '';
+    if (runtimeLogsLoaded && !reset) {
+      if (text) {
+        elements.runtimeLogOutput.append(
+          document.createTextNode(`${runtimeLogHasContent ? '\n' : ''}${text}`),
+        );
+        runtimeLogHasContent = true;
+      }
+    } else {
+      elements.runtimeLogOutput.textContent = text || '当前没有运行日志';
+      runtimeLogHasContent = Boolean(text);
+    }
+    runtimeLogsLoaded = true;
+    const previousCursor = runtimeLogCursor;
+    const nextCursor = data?.nextCursor === null || data?.nextCursor === undefined
+      ? '0'
+      : String(data.nextCursor);
+    runtimeLogCursor = nextCursor;
+    const hasMore = Boolean(text) && nextCursor !== previousCursor;
+    elements.loadMoreRuntimeLogs.hidden = !hasMore;
+    elements.reloadRuntimeLogsButton.querySelector('span').textContent = '重新载入运行日志';
+  } catch (error) {
+    if (!isAbort(error)) {
+      elements.runtimeLogOutput.textContent = `读取运行日志失败：${error?.message || '未知错误'}`;
+    }
+  } finally {
+    runtimeLogsLoading = false;
+    elements.runtimeLogView.setAttribute('aria-busy', 'false');
+    elements.reloadRuntimeLogsButton.disabled = false;
+    elements.loadMoreRuntimeLogs.disabled = false;
+  }
+}
+
+async function loadRuntimeLogMode() {
+  if (runtimeLogModeLoaded || disposed) return;
+  try {
+    const data = await execApi('runtime-log-mode');
+    elements.runtimeLogEnabled.checked = data?.enabled === true;
+    elements.runtimeLogEnabled.disabled = false;
+    elements.clearRuntimeLogsButton.disabled = false;
+    // 导出是只读动作，不受管理解锁的写保护约束。
+    elements.exportRuntimeLogsButton.disabled = false;
+    runtimeLogModeLoaded = true;
+  } catch (error) {
+    if (!isAbort(error)) {
+      showNotice(`读取运行日志开关失败：${error?.message || '未知错误'}`, { tone: 'danger' });
+    }
+  }
+}
+
+async function setRuntimeLogMode(enabled) {
+  if (disposed) return;
+  elements.runtimeLogEnabled.disabled = true;
+  try {
+    const data = await execApi('set-runtime-log-mode', [enabled ? '1' : '0']);
+    elements.runtimeLogEnabled.checked = data?.enabled === true;
+    showNotice(enabled ? '运行日志已记录全过程' : '运行日志仅记录失败', { tone: 'success' });
+  } catch (error) {
+    if (!isAbort(error)) {
+      elements.runtimeLogEnabled.checked = !enabled;
+      showNotice(`切换运行日志失败：${error?.message || '未知错误'}`, { tone: 'danger' });
+    }
+  } finally {
+    elements.runtimeLogEnabled.disabled = false;
+  }
+}
+
+// WebView 里由页面自己发起的下载不可靠，所以导出走后端：目的地由 shell 自己挑，
+// 前端一个参数都不传，然后把落盘路径显示出来。
+async function exportRuntimeLogs() {
+  if (disposed) return;
+  elements.exportRuntimeLogsButton.disabled = true;
+  try {
+    const data = await execApi('export-runtime-logs');
+    const path = typeof data?.path === 'string' ? data.path : '';
+    if (path) {
+      const size = Number.isFinite(Number(data?.bytes)) ? Number(data.bytes) : null;
+      elements.runtimeLogExportNote.textContent = size === null
+        ? `已导出到 ${path}`
+        : `已导出到 ${path}（${formatBytes(size)}）`;
+      elements.runtimeLogExportNote.hidden = false;
+      showNotice('运行日志已导出', { tone: 'success' });
+    } else {
+      showNotice('运行日志导出未返回路径', { tone: 'warning' });
+    }
+  } catch (error) {
+    if (!isAbort(error)) {
+      elements.runtimeLogExportNote.hidden = true;
+      showNotice(`导出运行日志失败：${error?.message || '未知错误'}`, { tone: 'danger' });
+    }
+  } finally {
+    elements.exportRuntimeLogsButton.disabled = false;
+  }
+}
+
+async function clearRuntimeLogs() {
+  if (disposed) return;
+  elements.clearRuntimeLogsButton.disabled = true;
+  try {
+    await execApi('clear-runtime-logs');
+    runtimeLogCursor = '0';
+    runtimeLogsLoaded = false;
+    runtimeLogHasContent = false;
+    elements.runtimeLogOutput.textContent = '当前没有运行日志';
+    elements.loadMoreRuntimeLogs.hidden = true;
+    showNotice('运行日志已清空', { tone: 'success' });
+  } catch (error) {
+    if (!isAbort(error)) {
+      showNotice(`清空运行日志失败：${error?.message || '未知错误'}`, { tone: 'danger' });
+    }
+  } finally {
+    elements.clearRuntimeLogsButton.disabled = false;
   }
 }
 
@@ -3093,6 +3252,9 @@ function setupInteractions() {
       if (input.checked && input.value === 'selected') loadDohApps({ reset: true });
     });
   });
+  elements.dohEndpoint.addEventListener('input', () => {
+    dohEndpointDirty = true;
+  });
   elements.dohTest.addEventListener('click', testDohEndpoint);
   elements.dohApply.addEventListener('click', openDohConfirmation);
   elements.dohDisable.addEventListener('click', disableDoh);
@@ -3305,6 +3467,13 @@ function setupInteractions() {
   elements.loadMoreHistory.addEventListener('click', () => loadHistory());
   elements.reloadLogsButton.addEventListener('click', () => loadRuleLogs({ reset: true }));
   elements.loadMoreLogs.addEventListener('click', () => loadRuleLogs());
+  elements.reloadRuntimeLogsButton.addEventListener('click', () => loadRuntimeLogs({ reset: true }));
+  elements.loadMoreRuntimeLogs.addEventListener('click', () => loadRuntimeLogs());
+  elements.runtimeLogEnabled.addEventListener('change', (event) => {
+    setRuntimeLogMode(event.target.checked);
+  });
+  elements.clearRuntimeLogsButton.addEventListener('click', () => clearRuntimeLogs());
+  elements.exportRuntimeLogsButton.addEventListener('click', () => exportRuntimeLogs());
   elements.clearHistoryButton.addEventListener('click', () => elements.clearHistoryDialog.showModal());
   elements.clearHistoryForm.addEventListener('submit', (event) => {
     event.preventDefault();
