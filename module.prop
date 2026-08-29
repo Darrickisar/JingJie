@@ -1,7 +1,7 @@
-id=jingjie_hosts
-name=净界
+id=zhulong_hosts
+name=烛龙
 version=V1.0
 versionCode=670
-updateJson=https://raw.githubusercontent.com/Darrickisar/JingJie/main/update.json
+updateJson=https://raw.githubusercontent.com/Darrickisar/ZhuLong/main/update.json
 author=相貌平平韩老魔
-description=面向 KernelSU、KernelSU Next 与 APatch 的低耗电过滤模块，支持 hosts、可选 DoH、规则管理和回滚。
+description=面向 KernelSU 及其分支的低耗电过滤模块，支持 hosts、可选 DoH、规则管理和回滚。

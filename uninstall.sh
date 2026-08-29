@@ -27,7 +27,7 @@ fi
 /system/bin/sh "$MODDIR/firewall_manager.sh" cleanup || failures=1
 
 if [ "$failures" -ne 0 ]; then
-  printf '%s\n' 'JingJie cleanup incomplete: owned resources remain or could not be verified' >&2
+  printf '%s\n' 'ZhuLong cleanup incomplete: owned resources remain or could not be verified' >&2
   exit 1
 fi
 

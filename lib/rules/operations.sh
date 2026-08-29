@@ -30,7 +30,7 @@ operation_token_valid() {
 
 operation_verb_valid() {
   case "$1" in
-    refresh|refresh-source|set-auto-refresh|set-builtin|add-source|update-source|set-source|move-source|remove-source|select-mode|pause|resume|set-lists|set-domain-decision|set-overrides|reset-rules|set-notice|set-log-mode|set-app-policy|rollback|set-history|clear-history|clear-cache|test-doh|set-doh|disable-doh) return 0 ;;
+    refresh|refresh-source|set-auto-refresh|set-builtin|add-source|update-source|set-source|move-source|remove-source|select-mode|pause|resume|set-lists|set-domain-decision|set-overrides|reset-rules|set-notice|set-app-policy|rollback|set-history|clear-history|clear-cache|test-doh|set-doh|disable-doh) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -51,7 +51,7 @@ operation_mount_repair() {
 operation_expected_argc() {
   case "$1" in
     refresh|pause|resume|rollback|reset-rules) printf '0\n' ;;
-    refresh-source|remove-source|select-mode|set-overrides|set-notice|set-log-mode) printf '1\n' ;;
+    refresh-source|remove-source|select-mode|set-overrides|set-notice) printf '1\n' ;;
     set-auto-refresh|set-builtin|add-source|set-source|move-source|set-lists) printf '2\n' ;;
     update-source) printf '3\n' ;;
     set-app-policy) printf '3\n' ;;
@@ -156,9 +156,6 @@ operation_arguments_valid() {
       ;;
     set-notice)
       [ "$1" = 0 ] || [ "$1" = 1 ]
-      ;;
-    set-log-mode)
-      case "$1" in off|blocked_error|all) return 0 ;; *) return 65 ;; esac
       ;;
     set-app-policy)
       operation_app_policy_args_valid "$1" "$2" "$3"
@@ -509,6 +506,13 @@ operation_error_message() {
     resume_history_reconcile_failed) printf '%s\n' '恢复保护时无法恢复拦截历史' ;;
     pause_recovery_failed) printf '%s\n' '暂停保护失败且原状态恢复未完成' ;;
     resume_recovery_failed) printf '%s\n' '恢复保护失败且暂停状态恢复未完成' ;;
+    pause_refresh_suspend_failed) printf '%s\n' '暂停保护时无法停止自动更新' ;;
+    pause_doh_suspend_failed) printf '%s\n' '暂停保护时无法停止加密 DNS' ;;
+    pause_app_policy_cleanup_failed) printf '%s\n' '暂停保护时无法移除分应用规则' ;;
+    pause_purge_failed) printf '%s\n' '拦截已停止，但缓存和历史世代未清理干净' ;;
+    resume_refresh_failed) printf '%s\n' '恢复保护时无法恢复自动更新' ;;
+    resume_doh_failed) printf '%s\n' '恢复保护时无法恢复加密 DNS' ;;
+    resume_app_policy_failed) printf '%s\n' '恢复保护时无法恢复分应用规则' ;;
     nflog_unsupported) printf '%s\n' '当前内核不支持拦截历史' ;;
     history_probe_failed) printf '%s\n' '拦截历史能力检测失败' ;;
     history_rules_unavailable) printf '%s\n' '当前规则尚未准备好' ;;
@@ -749,7 +753,7 @@ operation_submit() {
   operation_current_write "$id" "$verb" starting 0 0 "$now" || {
     result=$?; rm -rf "$RULE_OPERATIONS/$id"; rules_lock_release submit; return "$result"
   }
-  if ! "$SYSTEM_SH" "$MODDIR/process_manager.sh" start-operation "$id" >>"$RULE_LOG" 2>&1; then
+  if ! "$SYSTEM_SH" "$MODDIR/process_manager.sh" start-operation "$id" >>"$RUNTIME_LOG" 2>&1; then
     operation_current_clear_if_starting "$id"
     rm -rf "$RULE_OPERATIONS/$id"
     OPERATION_SUBMIT_ERROR=background_worker_unsupported

@@ -178,7 +178,7 @@ doh_private_dns_check() {
 
 doh_proxy_owned_pid() {
   [ "$#" -eq 1 ] || return 64
-  local wanted=$1 file pid token exe target=${DOH_COMPANION_TARGET:-$MODDIR/tools/jingjie_doh_proxy}
+  local wanted=$1 file pid token exe target=${DOH_COMPANION_TARGET:-$MODDIR/tools/zhulong_doh_proxy}
   for file in "$RULE_RUNTIME/doh/process"/slot-a.prop "$RULE_RUNTIME/doh/process"/slot-b.prop; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
     pid=$(sed -n '4s/^child_pid=//p' "$file")
@@ -708,7 +708,7 @@ doh_manager_disable_runtime_enhanced() {
   process_stop_doh b 2>/dev/null || true
 
   # cleanup 失败绝不能当作没发生：它一旦失败，清单就带着 active
-  # 状态留在盘上，槽位链 JJD4_A/JJD6_A 也留在内核里。下一次启用固定
+  # 状态留在盘上，槽位链 ZLD4_A/ZLD6_A 也留在内核里。下一次启用固定
   # 从槽位 A 开始，stage 碰上已存在的链直接返回 76，用户看到的就是
   # “启用加密 DNS 未完成：加密 DNS 运行失败”。记下失败，让下面走强制清理。
   if [ "$token" != null ]; then
@@ -764,6 +764,63 @@ doh_commit_disabled() {
   doh_runtime_write stopped absent system_dns null null null "$now"
 }
 
+# 暂停保护用的收尾：运行时一律回到「什么都没跑」，但 desired_mode 原样保留。
+# doh_state_update_runtime 在 effective=off 时只要求 transition 和 slot 为 null，
+# 对 desired 没有任何约束（doh_state_write 本身就会写 desired=<on> + effective=off），
+# 所以「用户想开、现在停着」是状态机里本来就合法的一格，不需要额外的旁挂文件。
+# 与 doh_disable 的区别：这里不清空 uid 清单，恢复时选中的应用要原样回来。
+doh_commit_suspended() {
+  [ "$#" -eq 1 ] || return 64
+  local desired=$1 now
+  doh_state_update_runtime "$desired" off null null null || return
+  now=$(date +%s 2>/dev/null || printf 0)
+  doh_runtime_write stopped absent system_dns null null null "$now"
+}
+
+# 暂停保护：停掉代理进程、摘掉转发、回收自有链，但不改用户的开关意图。
+# 常规路径失败就降级到强制清理，最后再把 desired 写回去——先把东西真正停掉，
+# 再记录意图，中途崩掉最多是留下一个「关着」的状态，绝不会留下跑着的进程。
+doh_manager_suspend() {
+  [ "$#" -eq 0 ] || return 64
+  local mode result release_result=0
+  rules_lock_acquire doh || return
+  doh_bootstrap || { result=$?; rules_lock_release doh; return "$result"; }
+  mode=$(doh_prop_value "$DOH_CONFIG_STATE" desired_mode) || {
+    result=$?; rules_lock_release doh; return "$result"
+  }
+  if [ "$mode" = off ]; then
+    rules_lock_release doh || return
+    return 0
+  fi
+  doh_manager_disable_runtime_enhanced
+  result=$?
+  [ "$result" -ne 0 ] || doh_commit_suspended "$mode" || result=$?
+  rules_lock_release doh || release_result=$?
+  if [ "$result" -eq 0 ]; then
+    runtime_log_event info doh suspend_ok "暂停保护：加密 DNS 已停止，恢复后按 $mode 装回" || true
+    return "$release_result"
+  fi
+  runtime_log_event error doh suspend_failed "暂停保护时停止加密 DNS 失败（码 $result）" || true
+  return "$result"
+}
+
+# 恢复保护：desired_mode 一直留着，直接走开机那条激活路径。
+# 本来就是 off 就什么都不做（doh_manager_boot 自己也会短路）。
+# 调用时机在 engine resume 之后，那时 active.prop 已经不是 paused，
+# 所以 boot 里的暂停短路不会挡住恢复。
+doh_manager_resume() {
+  [ "$#" -eq 0 ] || return 64
+  doh_manager_boot
+}
+
+# 暂停保护期间开机不许把代理拉起来。只读 active.prop，不碰锁。
+doh_active_paused() {
+  local file="$RULE_RUNTIME/active.prop" mode
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  mode=$("$BB" awk -F= '$1=="active_mode"{print $2}' "$file" 2>/dev/null || true)
+  [ "$mode" = paused ]
+}
+
 doh_manager_disable() {
   local result attempt=0 max_attempts=2
 
@@ -795,8 +852,14 @@ doh_manager_disable() {
 
       # 新增：关闭 DoH 后自动刷新规则（重新挂载 hosts）
       # 因为 DoH 关闭后，需要确保 hosts 文件重新生效
+      #
+      # 动词必须是 mount --repair。rule_engine.sh 没有 remount 这个动词，
+      # engine_dispatch 会直接返回 64，而这里的 `|| true` 把它咽掉了——
+      # 这段代码原本一次都没生效过。挂载修复自己带锁，所以必须在 doh 锁释放之后调用，
+      # 并且按 operation_mount_repair 的做法套上 timeout，免得挂死在这里。
       if [ -f "$MODDIR/rule_engine.sh" ]; then
-        sh "$MODDIR/rule_engine.sh" remount 2>/dev/null || true
+        "$BB" timeout -s TERM -k 5 30 "$SYSTEM_SH" "$MODDIR/rule_engine.sh" mount --repair \
+          >/dev/null 2>&1 || true
       fi
 
       return 0
@@ -820,6 +883,13 @@ doh_manager_boot() {
   mode=$(doh_prop_value "$DOH_CONFIG_STATE" desired_mode) || { result=$?; rules_lock_release doh; return "$result"; }
   if [ "$mode" = off ]; then
     rules_lock_release doh || return
+    return 0
+  fi
+  # 暂停保护期间不激活：desired_mode 留着是为了恢复时能装回来，不是为了现在就跑。
+  # 没有这一层，重启一次就把用户明确停掉的代理进程又拉起来了。
+  if doh_active_paused; then
+    rules_lock_release doh || return
+    runtime_log_event info doh boot_skipped_paused "保护已暂停，本次开机不启动加密 DNS" || true
     return 0
   fi
   doh_manager_activate boot
@@ -886,8 +956,8 @@ doh_manager_cleanup_uninstall() {
   doh_init_paths
   mkdir -p "$RULE_LOCKS" || return 73
   rules_lock_acquire doh || return
-  target=${DOH_COMPANION_TARGET:-$MODDIR/tools/jingjie_doh_proxy}
-  [ "$target" = "$MODDIR/tools/jingjie_doh_proxy" ] || { rules_lock_release doh; return 76; }
+  target=${DOH_COMPANION_TARGET:-$MODDIR/tools/zhulong_doh_proxy}
+  [ "$target" = "$MODDIR/tools/zhulong_doh_proxy" ] || { rules_lock_release doh; return 76; }
   if doh_triplet_validate "$DOH_CONFIG_STATE" "$DOH_CONFIG_ENDPOINT" "$DOH_CONFIG_UIDS" 2>/dev/null; then
     token=$(doh_prop_value "$DOH_CONFIG_STATE" transition_token 2>/dev/null || printf null)
   fi
@@ -921,6 +991,8 @@ doh_manager_dispatch() {
     test:2) doh_manager_test "$2" ;;
     apply:4) doh_manager_apply "$2" "$3" "$4" ;;
     disable:1) doh_manager_disable ;;
+    suspend:1) doh_manager_suspend ;;
+    resume:1) doh_manager_resume ;;
     force-disable:1) rules_lock_acquire doh && doh_manager_force_disable_runtime; result=$?; rules_lock_release doh; return "$result" ;;
     boot:1) doh_manager_boot ;;
     crash:2) doh_manager_crash "$2" ;;

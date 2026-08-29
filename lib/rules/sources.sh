@@ -448,7 +448,7 @@ source_run_fetcher() {
     error_file="$RULE_TMP/fetcher-error.$$.txt"
     rm -f "$error_file"
     CLASSPATH="$dex" "$BB" timeout -s TERM -k 1 "$remaining" \
-      "$app_process" /system/bin --nice-name=jingjie-fetcher com.jingjie.RuleFetcher \
+      "$app_process" /system/bin --nice-name=zhulong-fetcher com.zhulong.RuleFetcher \
       "$url" "$output" "$SOURCE_MAX_BYTES" "$connect_ms" "$read_ms" \
       > /dev/null 2> "$error_file" && {
         rm -f "$error_file" "$output.part"

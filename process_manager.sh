@@ -457,7 +457,7 @@ process_launcher_spawn() {
   case "$role" in
     crond)
       process_crond_schedule_valid || return
-      "$BB" crond -f -c "$RULE_RUNTIME/refresh/crontabs" >> "$RULE_LOG" 2>&1 &
+      "$BB" crond -f -c "$RULE_RUNTIME/refresh/crontabs" >> "$RUNTIME_LOG" 2>&1 &
       ;;
     history-reconcile)
       "$SYSTEM_SH" "$MODDIR/history_manager.sh" reconcile &
@@ -510,9 +510,9 @@ process_doh_supervisor_fail() {
     printf 'reason=%s\n' "$reason"
     printf 'at=%s\n' "$(date +%s 2>/dev/null || printf 0)"
   } > "$dir/supervisor-fail.prop" 2>/dev/null || true
-  printf 'jingjie-doh-supervisor: %s\n' "$reason" >&2
-  # 同时进运行日志：这句原来只写到 supervisor-fail.prop 和 stderr，而 stderr 是
-  # 被重定向进 rule-engine.log 的，用户在「运行日志」里永远看不到伴随进程的死因。
+  printf 'zhulong-doh-supervisor: %s\n' "$reason" >&2
+  # 同时写一条结构化事件：supervisor-fail.prop 只保留最后一次，stderr 是裸文本，
+  # 都不如运行日志里带 stage 的那一行好查。
   runtime_log_event error process supervisor_failed "监护进程报告：$reason" || true
 }
 
@@ -598,7 +598,7 @@ process_doh_spawn_supervisor() {
   local role=$1 slot=$2 transition=$3 config_file=$4 ready_file=$5 process_token=$6
   PROCESS_MANAGER_INTERNAL=1 "$BB" setsid "$BB" nohup "$SYSTEM_SH" "$MODDIR/process_manager.sh" \
     __doh_supervisor "$slot" "$transition" "$config_file" "$ready_file" "$process_token" "$role" \
-    </dev/null >> "$RULE_LOG" 2>&1 &
+    </dev/null >> "$RUNTIME_LOG" 2>&1 &
   PROCESS_DOH_SUPERVISOR_PID=$!
   export PROCESS_DOH_SUPERVISOR_PID
 }
@@ -781,7 +781,7 @@ process_start_managed_locked() {
   token=$(process_token_allocate) || return
   process_record_write pending "$token" "$role" 0 0 0 0 - - - - || return
   PROCESS_MANAGER_INTERNAL=1 "$BB" setsid "$BB" nohup "$SYSTEM_SH" "$MODDIR/process_manager.sh" __launcher "$role" "$token" \
-    </dev/null >> "$RULE_LOG" 2>&1 &
+    </dev/null >> "$RUNTIME_LOG" 2>&1 &
   child=$!
   attempt=0
   while [ "$attempt" -lt 30 ]; do
@@ -841,7 +841,7 @@ process_start_history_locked() {
     "$RULE_RUNTIME/history/flush-ack.$token.prop"
   process_record_write pending "$token" history-reader 0 0 0 0 - - - - || return
   PROCESS_MANAGER_INTERNAL=1 "$BB" setsid "$BB" nohup "$SYSTEM_SH" "$MODDIR/process_manager.sh" \
-    __history_launcher "$map_token" "$token" </dev/null >> "$RULE_LOG" 2>&1 &
+    __history_launcher "$map_token" "$token" </dev/null >> "$RUNTIME_LOG" 2>&1 &
   child=$!
   attempt=0
   while [ "$attempt" -lt 30 ]; do
@@ -1183,7 +1183,7 @@ process_start_operation_locked() {
   token=$(process_token_allocate) || return
   process_record_write pending "$token" operation-worker 0 0 0 0 - - - - || return
   "$BB" setsid "$BB" nohup "$SYSTEM_SH" "$MODDIR/operation_worker.sh" "$operation_id" "$token" \
-    </dev/null >> "$RULE_LOG" 2>&1 &
+    </dev/null >> "$RUNTIME_LOG" 2>&1 &
   child=$!
   attempt=0
   while [ "$attempt" -lt 20 ]; do

@@ -1,7 +1,18 @@
 #!/system/bin/sh
 
-RULE_MODULE_ID=jingjie_hosts
-RULE_LOG_LIMIT=262144
+# 品牌标识集中在这里，其他脚本一律从这些变量派生，不要再写字面量。
+# 改名时只动这一段：模块 id、防火墙链前缀、伴随进程文件名前缀。
+# 三者都是纯常量赋值，没有子进程、没有文件读取，因此不增加任何运行开销。
+RULE_MODULE_ID=zhulong_hosts
+# 拉丁品牌名，用于发布物名称（zip、仓库 URL）。大小写无法从小写 id 推导，
+# 所以单独声明；构建器读这一条决定 zip 文件名。
+RULE_BRAND_LATIN=ZhuLong
+# 自定义链名上限 28 字符，下面最长的 ${RULE_CHAIN_PREFIX}_HISTORY_GUARD 也远低于此。
+RULE_CHAIN_PREFIX=ZHULONG
+# DoH 链用短前缀：这些名字会进规则文本，短一点便于人工排查。
+RULE_DOH_CHAIN_PREFIX=ZLD
+# 伴随进程二进制与清单条目的文件名前缀。
+RULE_COMPANION_PREFIX=zhulong
 RUNTIME_LOG_LIMIT=262144
 
 rules_init_paths() {
@@ -14,13 +25,12 @@ rules_init_paths() {
   CONFIG_DIR="$MODDIR/config"
   CACHE_DIR="$MODDIR/cache"
   RULE_RUNTIME="$MODDIR/runtime"
-  RULE_LOG="$RULE_RUNTIME/logs/rule-engine.log"
   RUNTIME_LOG="$RULE_RUNTIME/logs/runtime.log"
   RULE_TMP="$RULE_RUNTIME/tmp"
   RULE_LOCKS="$RULE_RUNTIME/locks"
   RULE_GENERATIONS="$RULE_RUNTIME/generations"
   RULE_OPERATIONS="$RULE_RUNTIME/operations"
-  export MODDIR CONFIG_DIR CACHE_DIR RULE_RUNTIME RULE_LOG RUNTIME_LOG RULE_TMP
+  export MODDIR CONFIG_DIR CACHE_DIR RULE_RUNTIME RUNTIME_LOG RULE_TMP
   export RULE_LOCKS RULE_GENERATIONS RULE_OPERATIONS
 
   mkdir -p "$CONFIG_DIR/revisions" "$CACHE_DIR/custom" \
@@ -171,7 +181,6 @@ json_escape() {
 }
 
 # 把一条已成型的 JSON 行追加到日志文件，超过上限时轮转一代。
-# log_event 与 runtime_log_event 共用，轮转逻辑只保留一份。
 log_write_rotating() {
   log_file=$1
   log_limit=$2
@@ -191,36 +200,13 @@ log_write_rotating() {
   rm -f "$entry_tmp"
 }
 
+# 规则引擎事件。它以前写在单独的 rule-engine.log 里，也就是界面上的「规则日志」；
+# 那一栏被取消后这些事件并入运行日志，stage 固定为 engine，全模块只留一份日志文件：
+# 少一份要轮转、要占空间、要单独维护上限的文本，也不会再出现两份日志各说一半的情况。
+# 同时继承运行日志的开关语义——失败无条件落盘，每步成功的明细跟着开关走。
 log_event() {
-  level=$1
-  code=$2
-  message=$3
-  now=$(date +%s 2>/dev/null || printf '0')
-  level_json=$(printf '%s' "$level" | json_escape)
-  code_json=$(printf '%s' "$code" | json_escape)
-  message_json=$(printf '%s' "$message" | json_escape)
-  log_write_rotating "$RULE_LOG" "$RULE_LOG_LIMIT" \
-    "$(printf '{"time":%s,"level":"%s","code":"%s","message":"%s"}' \
-      "$now" "$level_json" "$code_json" "$message_json")"
-}
-
-# 日志档位：off / blocked_error / all。只有选“全部模块事件”时才写明细事件
-# （放行计数、命中来源等），其余档位保持安静，避免默认档位写出大量日志。
-log_mode_is_all() {
-  [ -n "${CONFIG_DIR-}" ] || return 1
-  [ -f "$CONFIG_DIR/log-mode.prop" ] || return 1
-  while IFS='=' read -r key value || [ -n "$key" ]; do
-    [ "$key" = mode ] || continue
-    [ "$value" = all ] && return 0
-    return 1
-  done < "$CONFIG_DIR/log-mode.prop"
-  return 1
-}
-
-# 只在“全部模块事件”档位落盘的明细日志；其他档位直接成功返回，不影响调用方。
-log_verbose_event() {
-  log_mode_is_all || return 0
-  log_event "$@"
+  [ "$#" -eq 3 ] || return 64
+  runtime_log_event "$1" engine "$2" "$3"
 }
 
 # 运行日志开关：runtime-log.prop 的 enabled=1。文件缺失时视为开启——

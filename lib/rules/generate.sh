@@ -2,6 +2,78 @@
 
 GEN_MAX_DOMAINS_DEFAULT=500000
 GEN_MAX_BYTES_DEFAULT=33554432
+# 合并缓存的格式版本。改了指纹口径或合并算法就加一，旧缓存自动失效。
+GEN_MERGE_CACHE_VERSION=1
+
+generation_merge_cache_dir() {
+  printf '%s\n' "${CACHE_DIR:-$MODDIR/cache}/merge"
+}
+
+# 合并结果只由「基线 + 各启用来源的优先级与归一化内容 + 归一化脚本本身」决定。
+# 黑白名单、例外、奖励广告全都在合并之后才参与，所以存名单前后拿到的是同一个指纹。
+# contrib 里的 path 带着 job.$$ 的进程号，每次都不一样，指纹只取前三列。
+generation_merge_fingerprint() {
+  local contrib=$1 base_sha=$2 lib_dir norm_sha norm_custom_sha
+  lib_dir=${RULE_LIB_DIR:-$MODDIR/lib/rules}
+  norm_sha=$(sha256_file "$lib_dir/normalize.awk") || return 66
+  norm_custom_sha=$(sha256_file "$lib_dir/normalize-custom.awk") || return 66
+  {
+    printf 'version=%s\nbase=%s\nnormalize=%s\nnormalize_custom=%s\n' \
+      "$GEN_MERGE_CACHE_VERSION" "$base_sha" "$norm_sha" "$norm_custom_sha"
+    "$BB" awk -F '\t' '{print $1 "\t" $2 "\t" $3}' "$contrib" | LC_ALL=C "$BB" sort
+  } | sha256_file_stdin
+}
+
+generation_merge_cache_load() {
+  local fingerprint=$1 dest=$2 dir meta rows version stored_fp stored_sha extra
+  dir=$(generation_merge_cache_dir)
+  meta="$dir/$fingerprint.prop"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ -f "$dir/$fingerprint.tsv" ] && [ ! -L "$dir/$fingerprint.tsv" ] || return 1
+  IFS="$(printf '\t')" read -r version stored_fp stored_sha rows extra < "$meta" || return 1
+  [ -z "$extra" ] || return 1
+  [ "$version" = "$GEN_MERGE_CACHE_VERSION" ] || return 1
+  [ "$stored_fp" = "$fingerprint" ] || return 1
+  case "$rows" in ''|*[!0-9]*) return 1 ;; esac
+  # 摘要现算现比：缓存被截断或改写过就当它不存在，回去重新合并一次。
+  [ "$stored_sha" = "$(sha256_file "$dir/$fingerprint.tsv")" ] || return 1
+  cp "$dir/$fingerprint.tsv" "$dest" || return 1
+}
+
+# 缓存只是加速手段，写不进去不该让这一代失败，所以全程不往外报错。
+# 先落内容再落元数据：元数据缺失或对不上只会让下一次miss，不会读到半份内容。
+generation_merge_cache_store() {
+  local fingerprint=$1 merged=$2 dir rows sha entry
+  dir=$(generation_merge_cache_dir)
+  mkdir -p "$dir" 2>/dev/null || return 0
+  rows=$("$BB" awk 'END{print NR+0}' "$merged" 2>/dev/null) || return 0
+  sha=$(sha256_file "$merged" 2>/dev/null) || return 0
+  rm -f "$dir/$fingerprint.prop"
+  cp "$merged" "$dir/$fingerprint.tsv.new" 2>/dev/null || {
+    rm -f "$dir/$fingerprint.tsv.new"
+    return 0
+  }
+  mv -f "$dir/$fingerprint.tsv.new" "$dir/$fingerprint.tsv" 2>/dev/null || {
+    rm -f "$dir/$fingerprint.tsv.new"
+    return 0
+  }
+  printf '%s\t%s\t%s\t%s\n' "$GEN_MERGE_CACHE_VERSION" "$fingerprint" "$sha" "$rows" \
+    > "$dir/$fingerprint.prop.new" 2>/dev/null || {
+    rm -f "$dir/$fingerprint.prop.new"
+    return 0
+  }
+  mv -f "$dir/$fingerprint.prop.new" "$dir/$fingerprint.prop" 2>/dev/null || {
+    rm -f "$dir/$fingerprint.prop.new"
+    return 0
+  }
+  # 只留当前这一份：来源换了内容，旧指纹再也不会命中，留着白占空间。
+  for entry in "$dir"/*; do
+    [ -e "$entry" ] || continue
+    case "${entry##*/}" in "$fingerprint.tsv"|"$fingerprint.prop") continue ;; esac
+    rm -f "$entry"
+  done
+  return 0
+}
 
 manifest_value() {
   local file=$1 key=$2
@@ -17,8 +89,20 @@ generation_rows_to_hosts() {
   } > "$output"
 }
 
+# 只用于已按域名排序的行（overrides_apply 结尾就是 sort -k1,1 -k2,2 -u）。
+# 排好序时相邻比较就够，不必为十几万个域名建一张哈希表——那是这一步的峰值内存，
+# 而手机上内存压力正是 crond 和读取进程被杀的原因。
 generation_domain_count() {
-  "$BB" awk -F '\t' 'NF && !seen[$1]++{n++} END{print n+0}' "$1"
+  "$BB" awk -F '\t' 'NF && $1!=prev{n++; prev=$1} END{print n+0}' "$1"
+}
+
+# 例外表为空时 overrides_apply 的输出就等于输入，可它照样要把十几万行流一遍再整份排序，
+# 「存名单」「改来源」这类操作每次都白跑两遍。绝大多数用户一条例外都没设，这一段最划算。
+# 注意：文件不存在不算空——那是配置损坏，仍旧交给 overrides_apply 去报错。
+generation_overrides_absent() {
+  local file=$1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  "$BB" awk 'NF{found=1; exit} END{exit found?1:0}' "$file"
 }
 
 generation_cleanup_outputs() {
@@ -40,22 +124,19 @@ build_generation() {
   mkdir -p "$tmp" || return 73
   base_norm="$tmp/base.tsv"
   recovery_norm="$tmp/recovery.tsv"
-  normalize_hosts "$rules_dir/base.hosts" "$base_norm" || { rm -rf "$tmp"; return 65; }
+  # 基线的归一化挪到合并那一段里去了：命中合并缓存时它的结果没人再用，白跑一趟。
   normalize_hosts "$rules_dir/recovery.hosts" "$recovery_norm" || { rm -rf "$tmp"; return 65; }
 
   records="$tmp/records.tsv"
-  "$BB" awk -F '\t' 'NF==2{print "0\t" $1 "\t" $2}' "$base_norm" > "$records"
   remote_allow_domains="$tmp/remote-allow-domains.tsv"
   : > "$remote_allow_domains"
   manual_blocklist="$CONFIG_DIR/revisions/$rev/manual-blocklist.txt"
   manual_allowlist="$CONFIG_DIR/revisions/$rev/manual-allowlist.txt"
-  if [ -f "$manual_blocklist" ] && [ -f "$manual_allowlist" ]; then
-    "$BB" awk 'NF{print "999999\t" $1 "\t0.0.0.0"}' "$manual_blocklist" >> "$records" || { rm -rf "$tmp"; return 74; }
-  fi
   # 把每个启用来源的归一化规则按优先级并入候选集；来源自带的例外规则进入最终放行名单。
   # 停用某个来源只是让它这一代不参与合并，缓存与配置都留着，重新启用后下一代就会恢复。
   local priority id kind enabled state updated count sha url_sha path allow_count skipped_count allow_path source_error extra
-  local source_row_count=0 enabled_source_count=0
+  local source_row_count=0 enabled_source_count=0 contrib="$tmp/contrib.tsv"
+  : > "$contrib"
   while IFS="$(printf '\t')" read -r priority id kind enabled state updated count sha url_sha path allow_count skipped_count allow_path source_error extra || \
     [ -n "${priority}${id}${kind}${enabled}${state}${updated}${count}${sha}${url_sha}${path}${allow_count}${skipped_count}${allow_path}${source_error}${extra}" ]; do
     [ -n "$id" ] || continue
@@ -68,19 +149,55 @@ build_generation() {
     [ "$state" = fresh ] || [ "$state" = stale ] || continue
     case "$path" in "$work/normalized/"*.tsv) ;; *) rm -rf "$tmp"; return 65 ;; esac
     [ -f "$path" ] || { rm -rf "$tmp"; return 66; }
-    "$BB" awk -F '\t' -v p="$priority" 'NF==2{print p "\t" $1 "\t" $2}' "$path" >> "$records"
+    printf '%s\t%s\t%s\t%s\n' "$priority" "$id" "$sha" "$path" >> "$contrib" || { rm -rf "$tmp"; return 74; }
     if [ "$allow_count" -gt 0 ]; then
       case "$allow_path" in "$work/normalized/"*.tsv.allow) ;; *) rm -rf "$tmp"; return 65 ;; esac
       [ -f "$allow_path" ] || { rm -rf "$tmp"; return 66; }
       cat "$allow_path" >> "$remote_allow_domains" || { rm -rf "$tmp"; return 74; }
     fi
   done < "$work/sources.tsv"
+
+  # 合并这一步要把十几万到几十万条规则排两遍，是整条流水线里最贵的一段，也是
+  # 手机上「存个名单要等很久、还烫手」的来源。但它只取决于基线和各启用来源的内容：
+  # 存黑白名单、改例外、点历史里的放行/拦截都不会改变它。所以按指纹缓存合并结果，
+  # 这类操作直接复用，只跑后面那段便宜的过滤与落盘。
+  local merge_base_sha merge_fingerprint merge_cached=0
   merged="$tmp/merged.tsv"
-  LC_ALL=C "$BB" sort -t "$(printf '\t')" -k2,2 -k1,1nr -k3,3 "$records" | \
+  merge_base_sha=$(sha256_file "$rules_dir/base.hosts") || { rm -rf "$tmp"; return 66; }
+  merge_fingerprint=$(generation_merge_fingerprint "$contrib" "$merge_base_sha") || merge_fingerprint=
+  if [ -n "$merge_fingerprint" ] && generation_merge_cache_load "$merge_fingerprint" "$merged"; then
+    merge_cached=1
+  else
+    normalize_hosts "$rules_dir/base.hosts" "$base_norm" || { rm -rf "$tmp"; return 65; }
+    "$BB" awk -F '\t' 'NF==2{print "0\t" $1 "\t" $2}' "$base_norm" > "$records"
+    while IFS="$(printf '\t')" read -r priority id sha path || [ -n "${priority}${id}${sha}${path}" ]; do
+      [ -n "$path" ] || continue
+      "$BB" awk -F '\t' -v p="$priority" 'NF==2{print p "\t" $1 "\t" $2}' "$path" >> "$records" || { rm -rf "$tmp"; return 74; }
+    done < "$contrib"
+    LC_ALL=C "$BB" sort -t "$(printf '\t')" -k2,2 -k1,1nr -k3,3 "$records" | \
+      "$BB" awk -F '\t' '
+        $2 != current { current=$2; chosen=$1 }
+        $1 == chosen { print $2 "\t" $3 }
+      ' | LC_ALL=C "$BB" sort -u > "$merged" || { rm -rf "$tmp"; return 74; }
+    [ -z "$merge_fingerprint" ] || generation_merge_cache_store "$merge_fingerprint" "$merged"
+  fi
+
+  # 手工黑名单以前是以 999999 优先级并进合并前的候选集的。它的优先级高于任何来源、
+  # 地址恒为 0.0.0.0，所以「合并后把这些域名的行换成 0.0.0.0」与原来完全等价——
+  # 而这样一来名单就不再是合并的输入，改名单才能命中上面的缓存。
+  # 位置必须留在奖励广告拆分之前，否则会改变「手工拦截 + 奖励例外」这一组的既有行为。
+  if [ -f "$manual_blocklist" ] && [ -f "$manual_allowlist" ]; then
     "$BB" awk -F '\t' '
-      $2 != current { current=$2; chosen=$1 }
-      $1 == chosen { print $2 "\t" $3 }
-    ' | LC_ALL=C "$BB" sort -u > "$merged" || { rm -rf "$tmp"; return 74; }
+      FILENAME==ARGV[1] { if (NF && $1 != "") blocked[$1]=1; next }
+      !($1 in blocked) { print }
+    ' "$manual_blocklist" "$merged" > "$merged.blocked" || { rm -rf "$tmp"; return 74; }
+    # 追加的手工黑名单行破坏了合并结果的有序性，而后面的域名计数靠相邻比较、跳过例外表
+    # 也要求输入有序。两边各自有序，用 sort -m 归并即可，不必为几十条新增再整份排一遍。
+    "$BB" awk 'NF && !seen[$1]++{print $1 "\t0.0.0.0"}' "$manual_blocklist" \
+      | LC_ALL=C "$BB" sort -u > "$merged.added" || { rm -rf "$tmp"; return 74; }
+    LC_ALL=C "$BB" sort -m -u "$merged.blocked" "$merged.added" > "$merged" || { rm -rf "$tmp"; return 74; }
+    rm -f "$merged.blocked" "$merged.added"
+  fi
 
   reward_domains="$tmp/reward-domains.tsv"
   whitelist_domains="$tmp/whitelist-domains.tsv"
@@ -100,9 +217,11 @@ build_generation() {
   reward_rows="$tmp/reward-rows.tsv"
   "$BB" awk -F '\t' 'FILENAME==ARGV[1]{blocked[$1]=1; next} !($1 in blocked){print}' \
     "$reward_domains" "$merged" > "$reward_rows"
-  cp "$reward_rows" "$all_rows" || { rm -rf "$tmp"; return 74; }
-  "$BB" awk 'NF{print $1 "\t0.0.0.0"}' "$reward_domains" >> "$all_rows"
-  LC_ALL=C "$BB" sort -u "$all_rows" -o "$all_rows"
+  # 直接管进 sort，省掉一次十几万行的整份复制。
+  {
+    cat "$reward_rows"
+    "$BB" awk 'NF{print $1 "\t0.0.0.0"}' "$reward_domains"
+  } | LC_ALL=C "$BB" sort -u > "$all_rows" || { rm -rf "$tmp"; return 74; }
 
   all_filtered="$tmp/all-filtered.tsv"
   reward_filtered="$tmp/reward-filtered.tsv"
@@ -114,8 +233,15 @@ build_generation() {
   overrides_file="$CONFIG_DIR/revisions/$rev/overrides.tsv"
   all_overridden="$tmp/all-overridden.tsv"
   reward_overridden="$tmp/reward-overridden.tsv"
-  overrides_apply "$all_filtered" "$overrides_file" "$all_overridden" || { rm -rf "$tmp"; return 65; }
-  overrides_apply "$reward_filtered" "$overrides_file" "$reward_overridden" || { rm -rf "$tmp"; return 65; }
+  # 没有任何例外时结果与输入逐字节相同（两份输入到这里都已经是 sort -u 的产物），
+  # 直接沿用，省掉两趟十几万行的流式过滤加整份排序。
+  if generation_overrides_absent "$overrides_file"; then
+    all_overridden=$all_filtered
+    reward_overridden=$reward_filtered
+  else
+    overrides_apply "$all_filtered" "$overrides_file" "$all_overridden" || { rm -rf "$tmp"; return 65; }
+    overrides_apply "$reward_filtered" "$overrides_file" "$reward_overridden" || { rm -rf "$tmp"; return 65; }
+  fi
   all_filtered=$all_overridden
   reward_filtered=$reward_overridden
 
@@ -127,50 +253,6 @@ build_generation() {
     rm -rf "$tmp"
     return 65
   fi
-  # 拦截历史只能看到被 REJECT 的连接，放行的连接在架构上抓不到，所以放行明细只能写进规则日志。
-  # 「全部模块事件」档位下把这一代的放行/拦截明细落盘，用户才能核对白名单、来源例外和奖励广告
-  # 例外到底放行了什么；其余档位保持安静。
-  if command -v log_verbose_event >/dev/null 2>&1; then
-    local allow_total manual_allow_count remote_allow_count reward_exception_count
-    local allow_effective effective_count effective_sample manual_block_count
-    allow_total=$("$BB" awk 'NF{count++} END{print count+0}' "$whitelist_domains" 2>/dev/null) || allow_total=0
-    manual_allow_count=$("$BB" awk 'NF{count++} END{print count+0}' "$tmp/whitelist-records.tsv" 2>/dev/null) || manual_allow_count=0
-    remote_allow_count=$("$BB" awk 'NF{count++} END{print count+0}' "$remote_allow_domains" 2>/dev/null) || remote_allow_count=0
-    reward_exception_count=$("$BB" awk 'NF{count++} END{print count+0}' "$reward_domains" 2>/dev/null) || reward_exception_count=0
-    log_verbose_event info generation_allowed \
-      "放行 $allow_total 个域名：白名单 $manual_allow_count、来源例外 $remote_allow_count；奖励广告例外 $reward_exception_count" || true
-    # 真正值得看的明细是「本来会被拦、因为放行名单留下来」的域名；名单里从没被任何来源拦过的域名不写。
-    allow_effective="$tmp/allow-effective.txt"
-    "$BB" awk -F '\t' 'FILENAME==ARGV[1]{allow[$1]=1; next} ($1 in allow) && !seen[$1]++{print $1}' \
-      "$whitelist_domains" "$all_rows" > "$allow_effective" 2>/dev/null || : > "$allow_effective"
-    effective_count=$("$BB" awk 'NF{count++} END{print count+0}' "$allow_effective" 2>/dev/null) || effective_count=0
-    if [ "$effective_count" -gt 0 ]; then
-      # 规则日志有体积上限，域名只列前 20 个，其余用省略号收尾。
-      effective_sample=$("$BB" awk 'NR<=20{printf "%s%s", (NR>1 ? "、" : ""), $1} END{if (NR>20) printf "…"}' \
-        "$allow_effective" 2>/dev/null) || effective_sample=''
-      log_verbose_event info generation_allow_detail \
-        "放行明细：$effective_count 个域名本来会被拦截，因命中放行名单而保留：$effective_sample" || true
-    else
-      log_verbose_event info generation_allow_detail '放行明细：本次没有域名因放行名单而保留' || true
-    fi
-    log_verbose_event info generation_blocked \
-      "拦截 $all_count 个域名（保留奖励广告模式 $reward_count 个）" || true
-    # 全部来源停用不等于暂停保护：来源规则整体失效，手工黑名单和内置基线照样拦截。
-    if [ "$enabled_source_count" -eq 0 ]; then
-      manual_block_count=0
-      if [ -f "$manual_blocklist" ]; then
-        manual_block_count=$("$BB" awk 'NF{count++} END{print count+0}' "$manual_blocklist" 2>/dev/null) || manual_block_count=0
-      fi
-      if [ "$source_row_count" -gt 0 ]; then
-        log_verbose_event warn generation_sources_disabled \
-          "全部规则来源已停用：来源规则不生效，仍在拦截的是内置基线与手工黑名单 $manual_block_count 条" || true
-      else
-        log_verbose_event warn generation_sources_disabled \
-          "没有任何规则来源：仍在拦截的是内置基线与手工黑名单 $manual_block_count 条" || true
-      fi
-    fi
-  fi
-
   generation_rows_to_hosts "$all_filtered" "$tmp/all"
   generation_rows_to_hosts "$reward_filtered" "$tmp/reward"
   generation_rows_to_hosts "$recovery_norm" "$tmp/recovery"

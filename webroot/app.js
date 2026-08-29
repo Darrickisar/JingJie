@@ -2,6 +2,7 @@ import {
   encodeBase64Bytes,
   encodeBase64Utf8,
   execApi,
+  pollBackoffMs,
   pollOperation,
   submitMutation,
 } from './api.js';
@@ -37,17 +38,17 @@ const SOURCE_ERRORS = {
 const HISTORY_ERRORS = {
   engine_failed: '后台任务执行失败',
   worker_lost: '后台任务已中断',
-  nflog_unsupported: '当前内核不支持拦截历史',
-  history_probe_failed: '拦截历史能力检测失败',
+  nflog_unsupported: '当前内核不支持拦截日志',
+  history_probe_failed: '拦截日志能力检测失败',
   history_rules_unavailable: '当前规则尚未准备好',
-  history_trace_prepare_failed: '拦截历史映射准备失败',
-  history_reader_start_failed: '拦截历史读取器启动失败',
-  history_firewall_install_failed: '拦截历史防火墙规则安装失败',
-  history_mount_failed: '拦截历史 trace hosts 挂载失败',
-  history_state_commit_failed: '拦截历史状态保存失败',
-  history_recovery_failed: '拦截历史启用失败且恢复未完成',
-  history_reader_stopped: '拦截历史读取器已停止',
-  history_runtime_incomplete: '拦截历史运行状态不完整',
+  history_trace_prepare_failed: '拦截日志映射准备失败',
+  history_reader_start_failed: '拦截日志读取器启动失败',
+  history_firewall_install_failed: '拦截日志防火墙规则安装失败',
+  history_mount_failed: '拦截日志 trace hosts 挂载失败',
+  history_state_commit_failed: '拦截日志状态保存失败',
+  history_recovery_failed: '拦截日志启用失败且恢复未完成',
+  history_reader_stopped: '拦截日志读取器已停止',
+  history_runtime_incomplete: '拦截日志运行状态不完整',
 };
 
 const DOH_ERRORS = {
@@ -66,6 +67,22 @@ const DOH_ERRORS = {
   companion_exited: '加密 DNS 组件已退出，已回退到系统 DNS',
 };
 
+// 后端返回的是机器码（owner_match_unavailable 之类），直接塞进界面用户看不懂。
+// 和 DOH_ERRORS 一样在这里翻成人话，认不出来的码退回通用说明。
+const APP_POLICY_REASONS = {
+  owner_match_unavailable: '当前内核的防火墙缺少 owner 匹配能力，无法按应用区分流量；普通 hosts 保护不受影响。',
+  redirect_unavailable: '当前内核缺少 DNS 重定向能力；普通 hosts 保护不受影响。',
+  probe_cleanup_failed: '能力探测后的清理未完成，未改动任何防火墙规则；重启后可再试。',
+};
+
+function appPolicyReasonMessage(value, fallback = '缺少 owner match 或安全的 IPv4/IPv6 规则能力；普通 hosts 保护不受影响。') {
+  const code = typeof value === 'string' ? value.trim() : '';
+  if (!code) return fallback;
+  if (APP_POLICY_REASONS[code]) return APP_POLICY_REASONS[code];
+  // 没收录的码不要原样显示，但也别丢掉：附在通用说明后面便于反馈。
+  return /^[a-z0-9_]+$/.test(code) ? `${fallback}（${code}）` : code;
+}
+
 const VERB_LABELS = {
   'set-lists': '保存黑白名单',
   'set-domain-decision': '更新域名名单',
@@ -82,8 +99,8 @@ const VERB_LABELS = {
   'remove-source': '删除来源',
   'select-mode': '切换模式',
   rollback: '切换历史版本',
-  'set-history': '开启拦截历史',
-  'clear-history': '清空拦截历史',
+  'set-history': '开启拦截日志',
+  'clear-history': '清空拦截日志',
   'clear-cache': '清理缓存',
   'set-notice': '保存提示偏好',
   'set-app-policy': '保存应用策略',
@@ -111,6 +128,25 @@ const PANEL_PREWARM_MAX_DEFERRALS = 24;
 // 入场动画跑完之前，底栏的折射层每帧都要重算背景，这段窗口里把它摘掉。
 const PANEL_SWITCH_SETTLE_MS = 260;
 const HISTORY_RENDER_CHUNK = 25;
+// 一页的条数。开着日志跑一阵子之后，聚合后的记录能有几千条；一次全挂进 DOM，
+// 从日志底栏切到别的底栏时浏览器要把这几千个节点连同它们的样式与折射层一起销毁，
+// 那一下就是用户看到的卡顿。分页之后列表里永远只有这一页，切换代价与记录总量无关。
+const HISTORY_PAGE_SIZE = 50;
+// 探针间隔。DoH 那边是 5s，但它等的是一次用户刚触发的状态翻转；
+// 拦截日志是长时间挂着看，放到 6s 并配合「签名不变就不读取」，空闲代价接近于零。
+const HISTORY_PULSE_INTERVAL_MS = 6000;
+// 开着日志但后端还没报「记录中」时的探针间隔。分开一个更长的值，是因为这种状态
+// 既要能自己恢复（不能像以前那样干脆不挂探针，那样界面就永远停在开启那一刻），
+// 又不该按 6 秒去问——它多半是刚开启还没收敛，或读取进程真的停了，等得起。
+const HISTORY_PULSE_SETTLING_INTERVAL_MS = 12000;
+// 刚开启后的收敛窗口：按 800ms 追问状态，等后端把 NFLOG 规则装好、读取进程起来。
+// 探针只 stat 事件文件 + 查一次运行状态，比整包读取便宜得多。
+// 只等 4 轮（约 3.2 秒）。以前等 15 轮，最坏要把用户按在按钮上等满 12 秒，
+// 而那之后无非是做同一次读取——等不到收敛也没有别的补救。现在等不到就直接读，
+// 剩下的交给探针在后台纠（logging 为假时它按 12 秒一轮，见 scheduleHistoryPulse），
+// 用户看到的是「点完很快出界面」，记录随后自己补上，代价没有增加。
+const HISTORY_SETTLE_INTERVAL_MS = 800;
+const HISTORY_SETTLE_ATTEMPTS = 4;
 const SURFACE_MODES = ['classic', 'liquid'];
 const SCHEME_MODES = ['light', 'dark', 'system'];
 const GLASS_LEVELS = ['soft', 'standard', 'strong'];
@@ -189,11 +225,11 @@ const elements = {
   historyTimeFilter: document.querySelector('#history-time-filter'),
   clearHistoryButton: document.querySelector('#clear-history-button'),
   historyList: document.querySelector('#history-list'),
-  loadMoreHistory: document.querySelector('#load-more-history'),
-  ruleLogView: document.querySelector('#rule-log-view'),
-  logOutput: document.querySelector('#log-output'),
-  reloadLogsButton: document.querySelector('#reload-logs-button'),
-  loadMoreLogs: document.querySelector('#load-more-logs'),
+  historyPager: document.querySelector('#history-pager'),
+  historyPrevPage: document.querySelector('#history-prev-page'),
+  historyNextPage: document.querySelector('#history-next-page'),
+  historyPageStatus: document.querySelector('#history-page-status'),
+  historyRefreshHint: document.querySelector('#history-refresh-hint'),
   runtimeLogView: document.querySelector('#runtime-log-view'),
   runtimeLogOutput: document.querySelector('#runtime-log-output'),
   reloadRuntimeLogsButton: document.querySelector('#reload-runtime-logs-button'),
@@ -234,8 +270,6 @@ const elements = {
   dohConfirmDialog: document.querySelector('#doh-confirm-dialog'),
   dohConfirmForm: document.querySelector('#doh-confirm-form'),
   dohConfirmEnable: document.querySelector('#doh-confirm-enable'),
-  logModeSelect: document.querySelector('#log-mode-select'),
-  saveLogModeButton: document.querySelector('#save-log-mode-button'),
   resetRulesButton: document.querySelector('#reset-rules-button'),
   resetRulesDialog: document.querySelector('#reset-rules-dialog'),
   resetRulesForm: document.querySelector('#reset-rules-form'),
@@ -309,10 +343,13 @@ let listsLoadPromise = null;
 let listsRevision = null;
 let historyStatus = null;
 let historyApps = [];
+let historyAppsFingerprintCache = null;
 let historyLoaded = false;
 let historyLoading = false;
-let historyCursor = '0';
-let historyHasMore = false;
+// 当前页码（从 0 数）与后端给出的聚合后总条数。页码兼作「用户翻过页没有」的判据：
+// 只有它大于 0 才说明用户离开了第一页，实时刷新这才需要让路。
+let historyPage = 0;
+let historyTotal = 0;
 let historyPanelActive = false;
 let historyQuerySerial = 0;
 let historyDomainTimer = null;
@@ -320,13 +357,16 @@ let historyDomainApplied = '';
 let historyDomainComposing = false;
 let historyRenderToken = 0;
 let historyReloadQueued = false;
+// 读回来发现当前页已经越界（过期删除让总数缩了）时要夹回的页码，由 finally 统一排。
+let historyClampPage = null;
 let historyAllowCacheText = null;
 let historyAllowCacheSet = new Set();
 let historyActionsDisabled = null;
-let logCursor = '0';
-let logsLoaded = false;
-let logsLoading = false;
-let logHasContent = false;
+let historyPulseTimer = null;
+let historyPulseSignature = null;
+// 翻过页期间探到的新签名。翻页时不方便直接刷新（会把用户从第三页拽回第一页），
+// 但也不能丢掉这个事实，否则翻过一次页就等于关掉了实时更新。
+let historyPendingSignature = null;
 let runtimeLogCursor = '0';
 let runtimeLogsLoaded = false;
 let runtimeLogsLoading = false;
@@ -356,8 +396,6 @@ let builtinRecoveryLoaded = false;
 let builtinRecoveryLoading = false;
 let overridesLoaded = false;
 let overridesLoading = false;
-let logModeLoaded = false;
-let logModeLoading = false;
 let diagnosticsLoading = false;
 let appearance = {
   surface: 'classic',
@@ -423,9 +461,25 @@ function elapsedSince(stamp) {
 }
 
 // 入场动画期间给 :root 挂个开关，好让样式表把那几帧真正贵的活儿摘掉。
+//
+// 这个开关本身不便宜：改 :root 上的属性会让整棵树的样式失效，实测一次切换要多花
+// 约 8ms 的样式重算。所以只在它真能省回来的那一种组合下才挂——液态材质的「浓郁」
+// 档位，那里有一层 SVG 位移滤镜（feDisplacementMap），每帧重算整块背景，
+// 比全树失效贵得多。其余组合（经典材质、轻透/标准玻璃）下挂了纯亏，
+// 因为它们没有折射层可摘，只剩光斑停帧那点收益。
+function panelSwitchNeedsGuard() {
+  const root = document.documentElement;
+  return root.dataset.surface === 'liquid' && root.dataset.glass === 'strong';
+}
+
 function markPanelSwitch() {
   lastTabSwitchAt = monotonicNow();
   const root = document.documentElement;
+  if (!panelSwitchNeedsGuard()) {
+    // 上一次切换可能留着这个属性（比如刚从浓郁档切到标准档），清掉再返回。
+    if (root.dataset.switching) delete root.dataset.switching;
+    return;
+  }
   root.dataset.switching = 'true';
   if (switchStateTimer !== null) {
     globalThis.clearTimeout(switchStateTimer);
@@ -579,7 +633,7 @@ function errorMessage(value, fallback = '') {
   return fallback;
 }
 
-function historyErrorMessage(value, fallback = '拦截历史状态异常') {
+function historyErrorMessage(value, fallback = '拦截日志状态异常') {
   const code = typeof value === 'string' ? value : value?.code;
   return HISTORY_ERRORS[code] || fallback;
 }
@@ -597,7 +651,7 @@ function statusPresentation(status) {
       headerIcon: 'circle-pause',
       headerTone: 'warning',
       title: '已暂停',
-      detail: '规则过滤已暂停，恢复后继续使用当前规则版本和模式',
+      detail: '规则过滤、自动刷新、加密 DNS 与分应用规则都已停止，恢复后重新下载并按当前模式装回',
       icon: 'circle-pause',
       tone: 'warning',
     };
@@ -722,7 +776,6 @@ function setWritesDisabled(disabled) {
   if (elements.appPolicyUids) elements.appPolicyUids.disabled = unavailable || appPolicyLoading;
   if (elements.appPolicyIps) elements.appPolicyIps.disabled = unavailable || appPolicyLoading;
   if (elements.domainOverrides) elements.domainOverrides.disabled = unavailable || overridesLoading;
-  if (elements.logModeSelect) elements.logModeSelect.disabled = unavailable || logModeLoading;
   if (elements.diagnosticsButton) {
     elements.diagnosticsButton.disabled = !initialized || Boolean(currentStatus?.busy) || diagnosticsLoading;
   }
@@ -792,7 +845,7 @@ function sourceCard(source, sourceIndex, sourceCount) {
   const disabled = !initialized || !managementUnlocked || Boolean(currentStatus?.busy);
   const meta = source.enabled
     ? `${formatCount(source.ruleCount)} 条 · ${formatTime(source.updatedAt)}`
-    : '已停用：规则不参与合并，缓存保留';
+    : '已停用：规则不参与合并，缓存已清理';
   const url = source.url
     ? `<span class="source-url" title="${escapeAttribute(source.url)}">${escapeText(source.url)}</span>`
     : '';
@@ -806,9 +859,12 @@ function sourceCard(source, sourceIndex, sourceCount) {
       </button>
     `
     : '';
-  const refreshDisabled = disabled || !source.enabled;
+  // 暂停期间刷新是被后端挡掉的（会下载全部来源并重建世代，正是暂停要停的事），
+  // 按钮跟着锁住，不要让用户点了才收到一句拒绝。
+  const refreshBlocked = !source.enabled || currentStatus?.activeMode === 'paused';
+  const refreshDisabled = disabled || refreshBlocked;
   const refreshAction = `
-    <button class="icon-button source-command source-refresh write-action" type="button" data-action="refresh" data-id="${escapeAttribute(source.id)}" data-guard-disabled="${!source.enabled}" aria-label="刷新 ${escapeAttribute(name)}" title="刷新此来源" ${refreshDisabled ? 'disabled' : ''}>
+    <button class="icon-button source-command source-refresh write-action" type="button" data-action="refresh" data-id="${escapeAttribute(source.id)}" data-guard-disabled="${refreshBlocked}" aria-label="刷新 ${escapeAttribute(name)}" title="${currentStatus?.activeMode === 'paused' ? '保护已暂停，恢复后才能刷新' : '刷新此来源'}" ${refreshDisabled ? 'disabled' : ''}>
       ${iconMarkup('refresh-cw')}
     </button>
   `;
@@ -850,7 +906,116 @@ function sourceCard(source, sourceIndex, sourceCount) {
   `;
 }
 
+// 卡片骨架（有哪些来源、什么顺序、名字和地址）在一次操作里是不变的，
+// 变的只有状态徽标、条数摘要、报错和启停。这个键只覆盖骨架部分。
+function sourceStructureKey(sources) {
+  return sources.map((source) => [
+    source.id,
+    source.kind,
+    source.url ?? '',
+    displaySourceName(source),
+  ].join('\u001f')).join('\u001e');
+}
+
+// 只把易变字段写回已有卡片。骨架不动，所以不拆 DOM、不重放入场动画，
+// 也不会把用户刚点的那个开关连同焦点一起销毁重建。
+function patchSourceCards(sources) {
+  const disabled = !initialized || !managementUnlocked || Boolean(currentStatus?.busy);
+  const directory = elements.builtinSources.closest('.source-directory');
+  sources.forEach((source, index) => {
+    const card = directory.querySelector(`.source-card[data-source-id="${cssEscapeId(source.id)}"]`);
+    if (!card) return;
+    const name = displaySourceName(source);
+    card.className = `source-card source-card-${source.kind} source-card-${source.state}`;
+
+    const chip = card.querySelector('.state-chip');
+    const state = sourceState(source);
+    if (chip) {
+      chip.className = `state-chip state-chip-${state.tone}`;
+      const chipText = chip.querySelector('span');
+      if (chipText) chipText.textContent = state.label;
+      // 图标是 <svg data-lucide><use href="./icons.svg#name">，两处都要改，
+      // 否则状态变了图标还停在上一个。
+      const chipIcon = chip.querySelector('svg[data-lucide]');
+      if (chipIcon && chipIcon.getAttribute('data-lucide') !== state.icon) {
+        chipIcon.setAttribute('data-lucide', state.icon);
+        chipIcon.querySelector('use')?.setAttribute('href', `./icons.svg#${state.icon}`);
+      }
+    }
+
+    const meta = card.querySelector('.source-meta');
+    if (meta) {
+      meta.textContent = source.enabled
+        ? `${formatCount(source.ruleCount)} 条 · ${formatTime(source.updatedAt)}`
+        : '已停用：规则不参与合并，缓存已清理';
+    }
+
+    // 报错行是「有就显示」，出现和消失都要处理，否则旧错误会一直挂着。
+    const errorText = sourceError(source);
+    let errorNode = card.querySelector('.source-error');
+    if (errorText && !errorNode) {
+      errorNode = document.createElement('p');
+      errorNode.className = 'source-error';
+      card.querySelector('.source-main')?.append(errorNode);
+    }
+    if (errorNode) {
+      if (errorText) errorNode.textContent = errorText;
+      else errorNode.remove();
+    }
+
+    const toggle = card.querySelector('[data-action="toggle"]');
+    if (toggle) {
+      // 不要覆盖用户刚拨过、正在等后端确认的那一下：只有值真的不同才写。
+      if (toggle.checked !== Boolean(source.enabled)) toggle.checked = Boolean(source.enabled);
+      toggle.disabled = disabled;
+      const label = toggle.closest('.switch-label');
+      if (label) label.title = `${source.enabled ? '停用' : '启用'} ${name}`;
+      const hidden = label?.querySelector('.visually-hidden');
+      if (hidden) hidden.textContent = `${source.enabled ? '停用' : '启用'} ${name}`;
+    }
+
+    const refresh = card.querySelector('[data-action="refresh"]');
+    if (refresh) {
+      const blocked = !source.enabled || currentStatus?.activeMode === 'paused';
+      refresh.dataset.guardDisabled = String(blocked);
+      refresh.disabled = disabled || blocked;
+      refresh.title = currentStatus?.activeMode === 'paused'
+        ? '保护已暂停，恢复后才能刷新'
+        : '刷新此来源';
+    }
+    card.querySelectorAll('[data-action="move"]').forEach((button) => {
+      const first = button.dataset.direction === 'up' && index === 0;
+      const last = button.dataset.direction === 'down' && index === sources.length - 1;
+      button.dataset.guardDisabled = String(first || last);
+      button.disabled = disabled || first || last;
+    });
+    card.querySelectorAll('[data-action="edit"],[data-action="delete"]').forEach((button) => {
+      button.disabled = disabled;
+    });
+  });
+}
+
+function cssEscapeId(value) {
+  const text = String(value ?? '');
+  return typeof CSS?.escape === 'function' ? CSS.escape(text) : text.replace(/["\\]/g, '\\$&');
+}
+
+let renderedSourceStructureKey = '';
+
 function renderSourceManagement(sources) {
+  const structureKey = sourceStructureKey(sources);
+  // 操作进行中会按轮询节奏反复调到这里（来源状态在 fresh/refreshing 之间来回跳）。
+  // 以前每次都 innerHTML 重建全部卡片并重放入场动画，那就是「切换来源很慢」的手感来源，
+  // 顺带还会把用户刚点的开关销毁重建、焦点丢掉。骨架没变就只改易变字段。
+  if (structureKey === renderedSourceStructureKey
+    && elements.builtinSources.querySelector('.source-card, .empty-state')) {
+    patchSourceCards(sources);
+    elements.addSourceButton.disabled = !initialized || !managementUnlocked
+      || Boolean(currentStatus?.busy)
+      || sources.filter((source) => source.kind === 'custom').length >= 16;
+    return;
+  }
+  renderedSourceStructureKey = structureKey;
   const builtins = sources.filter((source) => source.kind !== 'custom');
   const custom = sources.filter((source) => source.kind === 'custom');
   elements.builtinSources.innerHTML = builtins.length
@@ -1043,21 +1208,6 @@ async function saveOverrides() {
   await loadOverrides({ force: true });
 }
 
-async function loadLogMode({ force = false } = {}) {
-  if (logModeLoading || (logModeLoaded && !force)) return;
-  logModeLoading = true;
-  try {
-    const data = await execApi('log-mode');
-    elements.logModeSelect.value = ['off', 'blocked_error', 'all'].includes(data?.mode) ? data.mode : 'off';
-    logModeLoaded = true;
-  } catch (error) {
-    showNotice(`日志档位读取失败：${error?.message || '未知错误'}`, { persistent: true, tone: 'danger' });
-  } finally {
-    logModeLoading = false;
-    setWritesDisabled(Boolean(currentStatus?.busy));
-  }
-}
-
 function renderListCounts(blockCount, allowCount) {
   if (elements.blockListCount) elements.blockListCount.textContent = `${formatCount(blockCount)} 条`;
   if (elements.allowListCount) elements.allowListCount.textContent = `${formatCount(allowCount)} 条`;
@@ -1165,7 +1315,7 @@ function renderStatus(status) {
   if (elements.ruleImpactHint) {
     const localCopy = `本地规则 ${formatCount(status.ruleCount)} 条`;
     if (paused) {
-      elements.ruleImpactHint.textContent = '恢复保护后重新挂载当前规则版本';
+      elements.ruleImpactHint.textContent = '缓存与历史版本已清空，恢复保护时重新下载规则';
     } else if (allSourcesDisabled) {
       elements.ruleImpactHint.textContent = `${localCopy} · 已停用全部来源：来源规则不生效，手工黑名单仍然拦截`;
     } else if (noOnlineRules) {
@@ -1199,11 +1349,16 @@ function renderStatus(status) {
   });
   elements.modeSyncNote.textContent = paused
     ? '恢复后继续使用当前模式'
+    // 模式偏好确实保留，这句不用改；规则内容会重新下载，那句在上面的规则总数提示里。
     : status.desiredMode !== status.activeMode ? '模式等待应用' : '';
 
   elements.pauseProtectionButton.hidden = paused || !status.activeGeneration;
   elements.resumeProtectionButton.hidden = !paused;
   elements.pauseProtectionButton.dataset.guardDisabled = String(!status.activeGeneration);
+
+  // 暂停期间「立即刷新」会被后端拒掉：它要下载全部来源再重建世代，正是暂停停掉的事。
+  elements.refreshButton.dataset.guardDisabled = String(paused);
+  elements.refreshButton.title = paused ? '保护已暂停，恢复后才能刷新' : '';
 
   // 缓存只有在来源被停用之后才会变成没人用的死文件：启用中的来源要留着缓存断网兜底，
   // 删除来源时缓存已经顺手清掉了。所以没有停用来源就没有可清的东西，直接锁住按钮。
@@ -1834,8 +1989,12 @@ function watchBackendUntilIdle() {
   if (!backendWatch) {
     backendWatch = (async () => {
       try {
-        while (!disposed && currentStatus?.busy) {
-          await sleep(650);
+        // 每轮都是一次 status，也就是在手机上重新拉起一个 shell。这里跟的是别人发起的
+        // 后台任务（安装后首刷、只读态下另一处的操作），时长完全不由本页控制，固定
+        // 650ms 会让开销随任务时长一直线性长上去。用和 pollOperation 同一条退让曲线：
+        // 头几轮照旧密，进度条该跳还是跳；真拖长了就自己降到两秒一次。
+        for (let attempt = 0; !disposed && currentStatus?.busy; attempt += 1) {
+          await sleep(pollBackoffMs(attempt));
           const status = await execApi('status');
           renderStatus(status);
         }
@@ -1849,14 +2008,17 @@ function watchBackendUntilIdle() {
 
 async function reconcileUnknown() {
   showNotice('结果未知，正在核对模块状态', { persistent: true, tone: 'warning' });
-  while (!disposed) {
+  // 这个循环没有次数上限，只要后台一直报忙就一直读下去。固定 650ms 时，后台真卡住
+  // 就是每秒一个半 shell 一直烧到用户关掉页面——本文件里最费电的一处。同样退让到
+  // 两秒一次；核对的是「有没有变空闲」，晚一秒知道不影响任何结论。
+  for (let attempt = 0; !disposed; attempt += 1) {
     const status = await execApi('status');
     renderStatus(status);
     if (!status.busy) {
       showNotice('结果未知，请核对当前配置', { persistent: true, tone: 'warning' });
       return;
     }
-    await sleep(650);
+    await sleep(pollBackoffMs(attempt));
   }
 }
 
@@ -1891,7 +2053,7 @@ async function loadAppPolicy({ force = false } = {}) {
       || capability?.capability === 'supported';
     if (!supported) {
       elements.appPolicyStatus.textContent = '当前设备不支持静态应用策略';
-      elements.appPolicyDetail.textContent = capability?.reason || '缺少 owner match 或安全的 IPv4/IPv6 规则能力；普通 hosts 保护不受影响。';
+      elements.appPolicyDetail.textContent = appPolicyReasonMessage(capability?.reason);
       appPolicyLoaded = true;
       return;
     }
@@ -1949,6 +2111,7 @@ async function saveAppPolicy() {
 
 async function runMutation(verb, args = []) {
   if (!initialized || !managementUnlocked || currentStatus?.busy || disposed) return null;
+  let mutationOutcome = null;
   const progressStartedAt = globalThis.performance.now();
   const preserveProgressFeedback = async () => {
     const remaining = 120 - (globalThis.performance.now() - progressStartedAt);
@@ -1959,7 +2122,7 @@ async function runMutation(verb, args = []) {
   const optimistic = optimisticMutationStatus(verb, args);
   currentStatus = optimistic;
   const mutationLabel = verb === 'set-history'
-    ? (args[0] === '1' ? '开启拦截历史' : '关闭拦截历史')
+    ? (args[0] === '1' ? '开启拦截日志' : '关闭拦截日志')
     : VERB_LABELS[verb] || '处理操作';
   showNotice(`正在${mutationLabel}，请稍候`, {
     persistent: true,
@@ -2001,16 +2164,23 @@ async function runMutation(verb, args = []) {
         showNotice(`${mutationLabel}未成功：${reason}`, { persistent: true, tone: 'danger' });
       } else {
         showNotice(`${mutationLabel}完成`, { tone: 'success' });
+        historyPulseSignature = null;
+        historyLoaded = false;
+        // 开启后后端还要装 NFLOG 规则并起读取进程，history-status 会滞后一两拍。
+        // 先用探针等它收敛，再做唯一一次整包读取。以前是反过来的：先整包读一次，
+        // 再每 400ms 整包重读，最多五次——那五次里前几次读到的必然是「刚起来、事件数 0」，
+        // 每次却都要把两个事件文件过一遍 awk、把每个保留 token 的映射（最多 50 万行）
+        // 重新 sha256、再把 packages.list 归一化一遍。开启按钮之所以点下去等很久，
+        // 相当一部分就花在这些注定读不到东西的整包读取上。
+        // 探针只 stat 两个事件文件 + 查一次运行状态，代价小得多。窗口是 4 × 800ms ≈ 3.2 秒，
+        // 等不到就直接读，别把用户按在按钮上（见 HISTORY_SETTLE_ATTEMPTS）。
+        if (args?.[0] === '1') {
+          await settleHistoryAfterEnable();
+        }
+        // 收敛没等到也照样往下读：探针会继续在后台纠状态（见 scheduleHistoryPulse），
+        // 没必要把用户按在「开启中」上等满整个窗口。
         historyLoaded = false;
         await loadHistory({ reset: true });
-        // 开启后后端还要装 NFLOG 规则并起读取进程，history-status 可能滞后一两拍。
-        // 这里做有界重试，避免界面一直停在“开启拦截历史后显示记录”，逼用户去动筛选条件。
-        for (let attempt = 0; args?.[0] === '1' && attempt < 4
-          && !historyStatus?.enabled && historyPanelActive && !disposed; attempt += 1) {
-          await sleep(400);
-          historyLoaded = false;
-          await loadHistory({ reset: true });
-        }
       }
     } else if (verb === 'test-doh') {
       // 检测只探测 URL，不改任何规则，所以只看这次操作自己的结论。
@@ -2031,12 +2201,12 @@ async function runMutation(verb, args = []) {
       }
     } else if (verb === 'clear-history') {
       if (finalStatus.result === 'failed' || finalStatus.result === 'critical') {
-        showNotice('清空拦截历史未完成', { persistent: true, tone: 'danger' });
+        showNotice('清空拦截日志未完成', { persistent: true, tone: 'danger' });
       } else {
-        showNotice('拦截历史已清空', { tone: 'success' });
+        showNotice('拦截日志已清空', { tone: 'success' });
         historyLoaded = false;
-        historyCursor = '0';
-        historyHasMore = false;
+        historyPage = 0;
+        historyTotal = 0;
         await loadHistory({ reset: true });
       }
     } else {
@@ -2047,6 +2217,8 @@ async function runMutation(verb, args = []) {
       listsLoaded = false;
       await loadLists({ force: true });
     }
+    // 让调用方能区分“提交失败”和“提交成功但后台判失败”，拦截日志靠它决定回不回滚徽标。
+    mutationOutcome = { errorCode: null, result: finalStatus.result ?? null };
   } catch (error) {
     if (isAbort(error)) return null;
     await preserveProgressFeedback();
@@ -2056,11 +2228,11 @@ async function runMutation(verb, args = []) {
     }
     showNotice(error?.message || '操作未完成', { persistent: true, tone: 'danger' });
     // 让调用方能识别“后台已有操作”这种可以等待重试的失败。
-    return { errorCode: error?.code ?? null };
+    return { errorCode: error?.code ?? null, result: null };
   } finally {
     canonicalBeforeMutation = null;
   }
-  return null;
+  return mutationOutcome;
 }
 
 function normalizeAppearance(value) {
@@ -2606,11 +2778,15 @@ function selectTab(tab) {
   historyPanelActive = tab.id === 'tab-logs';
   appsPanelActive = tab.id === 'tab-apps';
   if (!appsPanelActive) stopDohRefresh();
+  if (!historyPanelActive) {
+    historyPulseSignature = null;
+    stopHistoryPulse();
+  }
   if (historyPanelActive && !historyLoaded && !historyLoading) {
     afterPanelSettled(tab, () => loadHistory({ reset: true }));
-  }
-  if (historyPanelActive && !logModeLoaded && !logModeLoading) {
-    afterPanelSettled(tab, () => loadLogMode());
+  } else if (historyPanelActive) {
+    // 列表已经加载过时不会再走 loadHistory，探针得在这里自己续上。
+    afterPanelSettled(tab, () => scheduleHistoryPulse());
   }
   if (historyPanelActive && !runtimeLogModeLoaded) {
     afterPanelSettled(tab, () => loadRuntimeLogMode());
@@ -2738,58 +2914,6 @@ async function handleSourceCommand(event) {
     elements.deleteDialog.showModal();
   } else if (control.dataset.action === 'refresh' && source.enabled) {
     await runMutation('refresh-source', [source.id]);
-  }
-}
-
-async function loadRuleLogs({ reset = false } = {}) {
-  if (logsLoading || disposed) return;
-  logsLoading = true;
-  elements.ruleLogView.setAttribute('aria-busy', 'true');
-  elements.reloadLogsButton.disabled = true;
-  elements.loadMoreLogs.disabled = true;
-  if (reset) {
-    logCursor = '0';
-    logsLoaded = false;
-    logHasContent = false;
-    elements.logOutput.textContent = '正在载入规则日志…';
-  }
-
-  try {
-    const data = await execApi('logs', [logCursor, '32768']);
-    const text = typeof data?.text === 'string'
-      ? data.text
-      : typeof data?.content === 'string'
-        ? data.content
-        : '';
-    if (logsLoaded && !reset) {
-      if (text) {
-        elements.logOutput.append(document.createTextNode(`${logHasContent ? '\n' : ''}${text}`));
-        logHasContent = true;
-      }
-    } else {
-      elements.logOutput.textContent = text || '当前没有规则日志';
-      logHasContent = Boolean(text);
-    }
-    logsLoaded = true;
-    const previousCursor = logCursor;
-    const nextCursor = data?.nextCursor === null || data?.nextCursor === undefined
-      ? '0'
-      : String(data.nextCursor);
-    logCursor = nextCursor;
-    const hasMore = typeof data?.hasMore === 'boolean'
-      ? data.hasMore
-      : Boolean(text) && nextCursor !== previousCursor;
-    elements.loadMoreLogs.hidden = !(hasMore && nextCursor !== previousCursor);
-    elements.reloadLogsButton.querySelector('span').textContent = '重新载入规则日志';
-  } catch (error) {
-    if (!isAbort(error)) {
-      elements.logOutput.textContent = `读取规则日志失败：${error?.message || '未知错误'}`;
-    }
-  } finally {
-    logsLoading = false;
-    elements.ruleLogView.setAttribute('aria-busy', 'false');
-    elements.reloadLogsButton.disabled = false;
-    elements.loadMoreLogs.disabled = false;
   }
 }
 
@@ -2925,9 +3049,9 @@ async function clearRuntimeLogs() {
 
 function historyStatusLabel(status) {
   if (currentStatus?.activeMode === 'paused') return { title: '保护已暂停', chip: '暂停期间不记录', tone: 'warning' };
-  if (status?.availability === 'unsupported') return { title: '当前内核不支持拦截历史', chip: '不可用', tone: 'danger' };
-  if (!status?.enabled) return { title: '拦截历史未启用', chip: '默认关闭', tone: 'neutral' };
-  if (status.logging) return { title: '正在记录拦截历史', chip: '记录中', tone: 'success' };
+  if (status?.availability === 'unsupported') return { title: '当前内核不支持拦截日志', chip: '不可用', tone: 'danger' };
+  if (!status?.enabled) return { title: '拦截日志未启用', chip: '默认关闭', tone: 'neutral' };
+  if (status.logging) return { title: '正在记录拦截日志', chip: '记录中', tone: 'success' };
   return { title: '拦截保护仍在运行', chip: '记录器未连接', tone: 'warning' };
 }
 
@@ -2957,7 +3081,7 @@ function syncHistoryControls() {
       control.disabled = actionsDisabled;
     });
   }
-  if (elements.loadMoreHistory) elements.loadMoreHistory.disabled = historyLoading;
+  renderHistoryPager();
 }
 
 function renderHistoryStatus(status = {}) {
@@ -2970,12 +3094,12 @@ function renderHistoryStatus(status = {}) {
   elements.historyEnabled.setAttribute('aria-expanded', String(enabled));
   elements.historyDetails.hidden = !enabled;
   elements.historyStatusDetail.textContent = currentStatus?.activeMode === 'paused'
-    ? '暂停期间不会写入或修改拦截历史；恢复保护后继续使用原有偏好。'
+    ? '暂停期间不会写入或修改拦截日志；恢复保护后继续使用原有偏好。'
     : status.availability === 'unsupported'
     ? '当前设备未提供 NFLOG 能力，普通 hosts 规则仍然正常工作。'
     : status.logging
-      ? '仅记录被拒绝的 TCP 连接起始请求；放行的连接抓不到，放行明细在下方「规则日志」。关闭后不再产生新的历史。'
-      : '开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电；放行的连接抓不到，放行明细在下方「规则日志」。';
+      ? '仅记录被拒绝的 TCP 连接起始请求；放行的连接抓不到。记录只保留最近 3 小时，更早的会自动删除。关闭后不再产生新的历史。'
+      : '开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电；放行的连接抓不到。记录只保留最近 3 小时，更早的会自动删除。';
   elements.historyCapability.textContent = status.availability === 'unsupported'
     ? '能力状态：不可用'
     : status.availability === 'available' ? '能力状态：可用' : '能力状态：待检测';
@@ -2988,19 +3112,48 @@ function renderHistoryStatus(status = {}) {
   }
   syncHistoryControls();
   refreshIcons(elements.historyStatusRail);
+  // 开启即实时：只看 enabled。以前这里要求 logging 也为真才挂探针，把
+  // scheduleHistoryPulse 内部刚放宽的判断又在调用方这一层堵回去了——logging 要靠
+  // shell 去问 iptables 和读取进程状态，任一次问失败就是 false，于是探针不挂、
+  // 签名基线还被清成 null，再没有任何东西会去重读一次，列表就永远停在开启那一刻的
+  // 空状态；用户只能靠改筛选条件（走的是不刷新状态的那条读取路径）才看得到记录。
+  // 那正是「开启后默认不显示、选了时间才显示」的直接来源。
+  // 现在开着就挂探针，logging 为假时由 scheduleHistoryPulse 自己换成更长的间隔，
+  // 让探针把状态纠回来；只有真的关掉了才清基线、收探针。
+  if (enabled) scheduleHistoryPulse();
+  else {
+    historyPulseSignature = null;
+    stopHistoryPulse();
+  }
+}
+
+// 应用清单是从已拦截的数据里汇总出来的，绝大多数刷新拿回的是和上一次一模一样的一份。
+// 名单没变就别重建 <select>：这里最多挂 1000 个 <option>，每次都拆光重插等于在
+// 用户可能正在拖动列表的那一帧里做上千次 DOM 写入。
+function historyAppsFingerprint(apps) {
+  return apps.map((app) => `${app.uid}:${(Array.isArray(app.packages) ? app.packages : []).join(',')}`).join('|');
 }
 
 function renderHistoryApps(apps = []) {
-  historyApps = Array.isArray(apps) ? apps : [];
+  const normalizedApps = Array.isArray(apps) ? apps : [];
+  const fingerprint = historyAppsFingerprint(normalizedApps);
+  if (fingerprint === historyAppsFingerprintCache && elements.historyAppFilter.options.length > 0) {
+    historyApps = normalizedApps;
+    return false;
+  }
+  historyAppsFingerprintCache = fingerprint;
+  historyApps = normalizedApps;
   const current = elements.historyAppFilter.value;
-  elements.historyAppFilter.replaceChildren(new Option('全部应用', '-'));
+  const fragment = document.createDocumentFragment();
+  fragment.append(new Option('全部应用', '-'));
   historyApps.forEach((app) => {
     const packages = Array.isArray(app.packages) ? app.packages : [];
     const label = packages[0] || `UID ${app.uid}`;
     const suffix = packages.length > 1 ? ` +${packages.length - 1}` : '';
-    const option = new Option(`${label}${suffix}`, String(app.uid));
-    elements.historyAppFilter.append(option);
+    fragment.append(new Option(`${label}${suffix}`, String(app.uid)));
   });
+  // 一次性换掉：逐个 append 到活的 <select> 上会让每次插入都动一遍它的选项索引。
+  elements.historyAppFilter.replaceChildren(fragment);
   const selected = [...elements.historyAppFilter.options].some((option) => option.value === current)
     ? current
     : '-';
@@ -3008,13 +3161,14 @@ function renderHistoryApps(apps = []) {
   return selected !== current;
 }
 
-function historyQueryArgs(cursor = historyCursor) {
+function historyQueryArgs(page = historyPage) {
   const seconds = Number(elements.historyTimeFilter.value || 0);
   const since = seconds > 0 ? Math.max(0, Math.floor(Date.now() / 1000) - seconds) : 0;
   const domain = elements.historyDomainFilter.value.trim().toLowerCase();
   return [
-    String(cursor),
-    '100',
+    // 后端的游标就是聚合排序后的行偏移，页码乘以页长即可，不必自己记游标。
+    String(Math.max(0, page) * HISTORY_PAGE_SIZE),
+    String(HISTORY_PAGE_SIZE),
     String(since),
     elements.historyAppFilter.value || '-',
     elements.historyPortFilter.value || '-',
@@ -3038,6 +3192,36 @@ function historyDecisionForDomain(domain, allowSet) {
   return allowSet.has(normalized) ? 'allow' : 'block';
 }
 
+// 徽标说的是这个域名当前的名单状态，不是这一条记录的结果：历史里只可能有被拦下来的连接。
+// 首次渲染和后来的就地改写都从这里取文案，免得两处各写一份、改一处忘一处。
+function historyDecisionPresentation(decision) {
+  if (decision === 'allow') {
+    return { label: '已放行', hint: '已在白名单：后续连接放行，不会再写进拦截日志' };
+  }
+  if (decision === 'block') {
+    return { label: '已拦截', hint: '不在白名单：按当前规则继续拦截' };
+  }
+  return { label: '未设置', hint: '尚未加入任何名单' };
+}
+
+// 加入名单只改这个域名的“当前名单状态”，历史记录本身一条都没变，
+// 所以不用重查后端再整段重建，直接把同域名的行就地改掉。
+function patchHistoryRowDecision(domain, decision) {
+  const normalized = String(domain || '').toLowerCase();
+  if (!normalized || !elements.historyList) return;
+  const { label, hint } = historyDecisionPresentation(decision);
+  // 用 dataset 比对而不是拼 attribute selector：域名里的字符不用再考虑选择器转义。
+  elements.historyList.querySelectorAll('.history-row').forEach((row) => {
+    if (row.dataset.domain !== normalized) return;
+    row.dataset.decision = decision;
+    const badge = row.querySelector('.history-decision');
+    if (!badge) return;
+    badge.className = `history-decision history-decision-${decision}`;
+    badge.title = hint;
+    badge.textContent = label;
+  });
+}
+
 function historyItemMarkup(item, allowSet) {
   const packages = Array.isArray(item.packages) ? item.packages : [];
   const app = packages[0] || `UID ${item.uid}`;
@@ -3046,11 +3230,7 @@ function historyItemMarkup(item, allowSet) {
   const decision = item.decision === 'allow' || item.decision === 'block'
     ? item.decision
     : historyDecisionForDomain(domain, allowSet);
-  const decisionLabel = decision === 'allow' ? '已放行' : decision === 'block' ? '已拦截' : '未设置';
-  // 徽标说的是这个域名当前的名单状态，不是这一条记录的结果：历史里只可能有被拦下来的连接。
-  const decisionHint = decision === 'allow'
-    ? '已在白名单：后续连接放行，不会再写进拦截历史'
-    : decision === 'block' ? '不在白名单：按当前规则继续拦截' : '尚未加入任何名单';
+  const { label: decisionLabel, hint: decisionHint } = historyDecisionPresentation(decision);
   const warning = Number(item.dropped || item.degraded) > 0
     ? `<span class="history-event-warning">${item.dropped ? `丢弃 ${formatCount(item.dropped)}` : ''}${item.dropped && item.degraded ? ' · ' : ''}${item.degraded ? `降级 ${formatCount(item.degraded)}` : ''}</span>`
     : '';
@@ -3108,13 +3288,154 @@ function renderHistoryItems(items, { reset = false } = {}) {
   if (!hasRows) {
     elements.historyList.innerHTML = '<p class="empty-state">当前没有拦截记录</p>';
   }
-  elements.loadMoreHistory.hidden = !historyHasMore;
+  renderHistoryPager();
+}
+
+function historyPageCount() {
+  return Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE));
+}
+
+// 翻页条。只有超过一页才显示——记录不多时多一条空按钮栏纯属噪音。
+function renderHistoryPager() {
+  if (!elements.historyPager) return;
+  const pages = historyPageCount();
+  const multi = historyTotal > HISTORY_PAGE_SIZE;
+  elements.historyPager.hidden = !multi || !historyStatus?.enabled;
+  if (elements.historyPageStatus) {
+    elements.historyPageStatus.textContent = `第 ${historyPage + 1} / ${pages} 页 · 共 ${formatCount(historyTotal)} 条`;
+  }
+  if (elements.historyPrevPage) elements.historyPrevPage.disabled = historyLoading || historyPage <= 0;
+  if (elements.historyNextPage) elements.historyNextPage.disabled = historyLoading || historyPage + 1 >= pages;
+}
+
+// 翻到某一页。页码越界（比如过期删除后总数变少）就夹回有效范围。
+function goToHistoryPage(page) {
+  if (historyLoading) return;
+  const target = Math.min(Math.max(0, page), historyPageCount() - 1);
+  if (target === historyPage) return;
+  loadHistory({ page: target, refreshMetadata: false });
+}
+
+// 开启后用探针等后端把 NFLOG 规则装好、读取进程起来。只 stat + 查运行状态，
+// 不做整包读取，所以可以等得久一点。等到了（或等超了）都返回，由调用方去做那一次读取。
+async function settleHistoryAfterEnable() {
+  for (let attempt = 0; attempt < HISTORY_SETTLE_ATTEMPTS; attempt += 1) {
+    if (disposed || !historyPanelActive) return;
+    await sleep(HISTORY_SETTLE_INTERVAL_MS);
+    if (disposed || !historyPanelActive) return;
+    let pulse = null;
+    try {
+      pulse = await execApi('history-pulse');
+    } catch {
+      // 探针失败不必打扰用户：真正的错误会在随后那次整包读取里报出来。
+      return;
+    }
+    // 关掉了（用户又点了一次，或后端回滚了）就不用再等。
+    if (!pulse?.enabled) return;
+    if (pulse.logging) return;
+  }
+}
+
+// 翻页期间探到新记录时给一个可点的提示，而不是默默不刷新。
+function renderHistoryPendingHint() {
+  if (!elements.historyRefreshHint) return;
+  elements.historyRefreshHint.hidden = historyPendingSignature === null;
+}
+
+function clearHistoryPendingHint() {
+  historyPendingSignature = null;
+  renderHistoryPendingHint();
 }
 
 async function loadHistoryStatus() {
   const data = await execApi('history-status');
   renderHistoryStatus(data || {});
   return data;
+}
+
+function stopHistoryPulse() {
+  if (historyPulseTimer !== null) {
+    globalThis.clearTimeout(historyPulseTimer);
+    timers.delete(historyPulseTimer);
+    historyPulseTimer = null;
+  }
+}
+
+// 开着拦截日志时记录就该自己冒出来，不该逼用户去动筛选条件。但也不能常驻轮询：
+// 只在日志页真的可见、且读取进程确实在跑时才探一下，离开页签或息屏立刻停。
+// 探针只 stat 事件文件（见 history_pulse_json），空闲时的代价就是每轮一次 stat，
+// 签名没变一次读取都不发；真有新事件才走一次完整读取。
+function scheduleHistoryPulse() {
+  stopHistoryPulse();
+  if (disposed || !historyPanelActive || document.hidden) return;
+  // 只看 enabled，不再要求 logging。以前要求 logging 为真才挂探针，而 logging 是
+  // 「防火墙规则在位 + 读取进程在跑 + trace 挂载 + token 对齐」四个条件同时成立才为真，
+  // 其中前两个要靠 shell 去问 iptables 和进程状态——任一次问失败（比如 xtables 锁被占）
+  // 就会得到 false。那时探针不挂、也没有别的东西会再去读一次状态，列表就永远停在
+  // 开启那一刻的空状态，用户只能靠动筛选条件（走的是另一条不刷新状态的读取路径）
+  // 才能看到记录。现在开着就挂探针，由探针自己把状态纠回来；logging 为假时用更长的间隔。
+  if (!historyStatus?.enabled) return;
+  if (currentStatus?.activeMode === 'paused') return;
+  const interval = historyStatus?.logging ? HISTORY_PULSE_INTERVAL_MS : HISTORY_PULSE_SETTLING_INTERVAL_MS;
+  historyPulseTimer = schedule(async () => {
+    historyPulseTimer = null;
+    await runHistoryPulse();
+    scheduleHistoryPulse();
+  }, interval);
+}
+
+async function runHistoryPulse() {
+  if (disposed || !historyPanelActive || document.hidden || historyLoading) return;
+  if (currentStatus?.busy) return;
+  let pulse = null;
+  try {
+    pulse = await execApi('history-pulse');
+  } catch {
+    // 探针失败不该打扰用户：下一轮再试，真正的错误会在用户主动读取时报出来。
+    return;
+  }
+  if (disposed || !historyPanelActive) return;
+  // 关掉了就收手：这是用户的意思，没有新事件可等。
+  if (!pulse?.enabled) {
+    historyPulseSignature = null;
+    stopHistoryPulse();
+    if (!historyLoading) await loadHistory({ reset: true });
+    return;
+  }
+  // 界面显示的 logging 与后端不一致时读一次，把状态栏纠回来（顺带重排探针间隔）。
+  // 以前这里是「logging 为假就停掉探针 + 整包重读一次」：停探针让界面失去自愈能力，
+  // 而那一次整包重读在读取进程真停了的情况下每 6 秒来一遍，纯烧电。
+  const loggingChanged = pulse.logging !== Boolean(historyStatus?.logging);
+  const signature = typeof pulse.signature === 'string' ? pulse.signature : null;
+  // 签名变了就一定要读，不管 logging 报的是什么。logging 要靠 shell 去问 iptables
+  // 和进程状态，任一次问失败就会得到 false；而事件文件确实长大了是硬事实——
+  // 读取进程明明在写，界面却因为 logging 为假而不去读，正是「不动筛选条件就看不到记录」。
+  const changed = signature !== null && signature !== historyPulseSignature;
+  if (loggingChanged && !changed) {
+    if (!historyLoading) await loadHistory({ reset: true });
+    return;
+  }
+  // 基线由上一次真正的读取写入（history-bundle 和 history 都会带回签名），所以比出不同
+  // 就是「读完之后又有新事件」，不需要为首次探针留特例。
+  if (!changed) return;
+  // 正在用输入法打域名时不要动列表：重建上百行会把主线程占住，表现成输入卡顿。
+  // 打完（compositionend 会触发一次读取）自然跟上。
+  if (historyDomainComposing) return;
+  // 翻过页就不能直接拽回第一页——用户正在看第三页。但也不能像以前那样当作
+  // 「此后永不刷新」：那是「记录不完整」的一个直接来源，用户翻过一次页之后
+  // 新拦截的连接再也不会自己出现。这里记下有新记录，并在状态栏提示，
+  // 等他回到第一页、改筛选条件或点了提示就补上。
+  if (historyPage > 0) {
+    historyPendingSignature = signature;
+    renderHistoryPendingHint();
+    return;
+  }
+  // 域名筛选不再阻止刷新：筛选串是带给后端的查询参数，重读会照样按它过滤，
+  // 结果仍然是「符合当前筛选的最新记录」，没有把用户的筛选弄丢的问题。
+  // 这一轮走打包读取：拦截计数和应用清单都要跟着新事件走，二者都在 history-bundle 里。
+  // 打包读取只比单读贵两遍 awk（统计与应用汇总），而且都在已经收集好的临时文件上跑——
+  // 事件文件本身一趟不多走。清单没变时 renderHistoryApps 还会跳过整段 <select> 重建。
+  await loadHistory({ reset: true });
 }
 
 function diagnosticValueLabel(kind, value) {
@@ -3176,7 +3497,9 @@ async function loadDiagnostics() {
   }
 }
 
-async function loadHistory({ reset = false, refreshMetadata = reset } = {}) {
+// page 给了就读那一页；不给则按 reset 决定读第一页还是留在当前页。
+// 每次读取都整页换掉列表，所以 DOM 里始终只有 HISTORY_PAGE_SIZE 行。
+async function loadHistory({ reset = false, refreshMetadata = reset, page = null } = {}) {
   if (!historyPanelActive || disposed) return;
   if (historyLoading) {
     if (reset) {
@@ -3187,9 +3510,13 @@ async function loadHistory({ reset = false, refreshMetadata = reset } = {}) {
   }
   historyLoading = true;
   const serial = ++historyQuerySerial;
-  if (reset) {
-    historyCursor = '0';
-    historyHasMore = false;
+  const targetPage = page !== null ? Math.max(0, page) : reset ? 0 : historyPage;
+  historyPage = targetPage;
+  if (targetPage === 0) {
+    // 回到第一页就等于把「有新记录」这件事消化掉了，提示该收。
+    clearHistoryPendingHint();
+  }
+  if (reset || page !== null) {
     // 列表里已经有行时不要先拆空再重建。搜索域名是一边打字一边触发的，
     // 每次都「拆掉上百行 → 插入占位 → 拆掉占位 → 再插回上百行」，
     // 四趟 DOM 里有两趟纯属白跑，主线程被占住就成了输入法卡顿。
@@ -3197,28 +3524,48 @@ async function loadHistory({ reset = false, refreshMetadata = reset } = {}) {
     if (elements.historyList.querySelector('.history-row')) {
       elements.historyList.setAttribute('aria-busy', 'true');
     } else {
-      elements.historyList.innerHTML = '<p class="empty-state">正在读取拦截历史…</p>';
+      elements.historyList.innerHTML = '<p class="empty-state">正在读取拦截日志…</p>';
     }
   }
   syncHistoryControls();
   try {
-    if (refreshMetadata || !historyStatus) await loadHistoryStatus();
-    if (serial !== historyQuerySerial || disposed || !historyPanelActive) return;
+    // 需要刷新元数据时（进入页签、开关历史后）三份数据一次取回：状态 + 应用清单 + 首页记录。
+    // 分开读要走三次 shell，而后端为此把事件收集和 packages.list 归一化各做两遍。
+    let apps = null;
+    let initialData = null;
+    if (refreshMetadata) {
+      const bundle = await execApi('history-bundle', historyQueryArgs(targetPage));
+      if (serial !== historyQuerySerial || disposed || !historyPanelActive) return;
+      // 状态一到就先渲染，不要等名单：名单只影响下面那批行的名单徽标，
+      // 让开关和能力状态跟着一次慢的名单读取一起卡住是没必要的。
+      // 先记基线再渲染状态：renderHistoryStatus 会挂探针，探针拿到的必须是这一页
+      // 数据对应的签名，否则第一轮就会白读一次。
+      if (typeof bundle?.signature === 'string') historyPulseSignature = bundle.signature;
+      renderHistoryStatus(bundle?.status || {});
+      apps = bundle?.apps;
+      initialData = bundle?.history;
+    } else {
+      if (!historyStatus) await loadHistoryStatus();
+      if (serial !== historyQuerySerial || disposed || !historyPanelActive) return;
+    }
     if (!historyStatus?.enabled) {
-      historyCursor = '0';
-      historyHasMore = false;
+      historyPage = 0;
+      historyTotal = 0;
       // 不要在这里把 historyLoaded 置为已加载：开启动作刚提交时后端可能还没翻转状态，
       // latch 住之后重新进入页签也不会重试，用户就只能靠改筛选条件才能看到记录。
       historyLoaded = false;
-      elements.historyList.innerHTML = '<p class="empty-state">开启拦截历史后显示记录</p>';
-      elements.loadMoreHistory.hidden = true;
+      elements.historyList.innerHTML = '<p class="empty-state">开启拦截日志后显示记录</p>';
+      renderHistoryPager();
       return;
     }
-    const listsRequest = refreshMetadata && !listsLoaded ? loadLists() : Promise.resolve();
-    const appsRequest = refreshMetadata ? execApi('history-apps') : Promise.resolve(null);
-    const historyRequest = execApi('history', historyQueryArgs(reset ? '0' : historyCursor));
-    const [, apps, initialData] = await Promise.all([listsRequest, appsRequest, historyRequest]);
-    if (serial !== historyQuerySerial || disposed || !historyPanelActive) return;
+    if (refreshMetadata) {
+      // 名单只在真要渲染行时才需要（决定名单徽标），历史没开就不用白读一次。
+      if (!listsLoaded) await loadLists();
+      if (serial !== historyQuerySerial || disposed || !historyPanelActive) return;
+    } else {
+      initialData = await execApi('history', historyQueryArgs(targetPage));
+      if (serial !== historyQuerySerial || disposed || !historyPanelActive) return;
+    }
     let data = initialData;
     let appFilterReset = refreshMetadata && renderHistoryApps(apps?.apps);
     const initialItems = Array.isArray(data?.items) ? data.items : [];
@@ -3230,22 +3577,37 @@ async function loadHistory({ reset = false, refreshMetadata = reset } = {}) {
       appFilterReset = renderHistoryApps(latestApps?.apps);
     }
     if (appFilterReset) {
-      data = await execApi('history', historyQueryArgs('0'));
+      historyPage = 0;
+      data = await execApi('history', historyQueryArgs(0));
       if (serial !== historyQuerySerial || disposed || !historyPanelActive) return;
     }
     const items = Array.isArray(data?.items) ? data.items : [];
-    historyCursor = data?.nextCursor === null || data?.nextCursor === undefined
-      ? historyCursor
-      : String(data.nextCursor);
-    historyHasMore = Boolean(data?.hasMore) && items.length > 0;
+    // 单读路径（改筛选条件、翻页）也带回签名，把轮询基线一起更新。不更新的话，
+    // 下一轮探针会拿这一页之前的旧基线去比，必然比出不同，白做一次整包读取。
+    // 只在第一页更新：翻页读的是同一份数据的后续页，基线不该跟着往后走。
+    if (historyPage === 0 && typeof data?.signature === 'string') historyPulseSignature = data.signature;
+    // total 是后端聚合排序后的总条数。老后端没有这个字段时退回按 hasMore 估一个下界，
+    // 至少还能翻到下一页，不会因为算出「共 1 页」把后面的记录全藏起来。
+    const reportedTotal = Number(data?.total);
+    historyTotal = Number.isInteger(reportedTotal) && reportedTotal >= 0
+      ? reportedTotal
+      : historyPage * HISTORY_PAGE_SIZE + items.length + (data?.hasMore ? 1 : 0);
+    // 过期删除或筛选变化让总数缩了，当前页可能已经越界（表现成空列表）。夹回最后一页重读一次。
+    // 直接在这里递归会在外层 finally 之前重入，historyReloadQueued 的归属就乱了。
+    // 记下要夹回的页码，交给 finally 统一排一次。
+    const lastPage = historyPageCount() - 1;
+    if (items.length === 0 && historyPage > lastPage) {
+      historyClampPage = Math.max(0, lastPage);
+    }
     historyLoaded = true;
-    renderHistoryItems(items, { reset });
+    // 每页都整页换掉，列表里始终只有这一页。
+    renderHistoryItems(items, { reset: true });
   } catch (error) {
     if (!isAbort(error) && serial === historyQuerySerial && historyPanelActive) {
       if (reset) {
-        elements.historyList.innerHTML = `<p class="empty-state">读取拦截历史失败：${escapeText(error?.message || '未知错误')}</p>`;
+        elements.historyList.innerHTML = `<p class="empty-state">读取拦截日志失败：${escapeText(error?.message || '未知错误')}</p>`;
       }
-      showNotice(`读取拦截历史失败：${error?.message || '未知错误'}`, { persistent: true, tone: 'danger' });
+      showNotice(`读取拦截日志失败：${error?.message || '未知错误'}`, { persistent: true, tone: 'danger' });
     }
   } finally {
     historyLoading = false;
@@ -3253,8 +3615,12 @@ async function loadHistory({ reset = false, refreshMetadata = reset } = {}) {
     syncHistoryControls();
     const reloadQueued = historyReloadQueued;
     historyReloadQueued = false;
+    const clampPage = historyClampPage;
+    historyClampPage = null;
     if (reloadQueued && historyPanelActive && !disposed) {
       schedule(() => loadHistory({ reset: true }), 0);
+    } else if (clampPage !== null && historyPanelActive && !disposed) {
+      schedule(() => loadHistory({ page: clampPage, refreshMetadata: false }), 0);
     }
   }
 }
@@ -3322,11 +3688,6 @@ function setupInteractions() {
     ]);
     builtinRecoveryLoaded = false;
     await loadBuiltinRecovery({ force: true });
-  });
-  elements.saveLogModeButton.addEventListener('click', async () => {
-    await runMutation('set-log-mode', [elements.logModeSelect.value]);
-    logModeLoaded = false;
-    await loadLogMode({ force: true });
   });
   elements.resetRulesButton.addEventListener('click', () => elements.resetRulesDialog.showModal());
   elements.resetRulesForm.addEventListener('submit', async (event) => {
@@ -3438,12 +3799,23 @@ function setupInteractions() {
     const row = action.closest('.history-row');
     const domain = row?.dataset.domain;
     if (!domain) return;
+    const decision = action.dataset.historyDecision;
+    const previousDecision = row.dataset.decision;
+    // 先把徽标改过去，用户点完立刻看到结果；失败再翻回原样。
+    patchHistoryRowDecision(domain, decision);
     row.setAttribute('aria-busy', 'true');
     row.querySelectorAll('[data-history-decision]').forEach((button) => { button.disabled = true; });
     try {
-      await runMutation('set-domain-decision', [action.dataset.historyDecision, encodeBase64Utf8(domain)]);
-      historyLoaded = false;
-      await loadHistory({ reset: true });
+      const outcome = await runMutation('set-domain-decision', [decision, encodeBase64Utf8(domain)]);
+      // 历史记录是既成事实的连接日志，加名单不会改动其中任何一条，变的只是
+      // 「这个域名现在在哪个名单里」。所以成功后不再整段重查重建，
+      // 上面那次就地改写就是最终结果；失败才回滚徽标。
+      const rejected = Boolean(outcome?.errorCode)
+        || outcome?.result === 'failed' || outcome?.result === 'critical';
+      if (rejected) patchHistoryRowDecision(domain, previousDecision);
+    } catch (error) {
+      patchHistoryRowDecision(domain, previousDecision);
+      throw error;
     } finally {
       if (row.isConnected) {
         row.removeAttribute('aria-busy');
@@ -3455,7 +3827,8 @@ function setupInteractions() {
   });
   const resetHistoryQuery = () => {
     historyLoaded = false;
-    loadHistory({ reset: true, refreshMetadata: false });
+    // 换了筛选条件，原来的第几页没有意义了，回第一页。
+    loadHistory({ reset: true, refreshMetadata: false, page: 0 });
   };
   elements.historyAppFilter.addEventListener('change', resetHistoryQuery);
   elements.historyPortFilter.addEventListener('change', resetHistoryQuery);
@@ -3495,9 +3868,12 @@ function setupInteractions() {
     }
     scheduleHistoryDomainQuery();
   });
-  elements.loadMoreHistory.addEventListener('click', () => loadHistory());
-  elements.reloadLogsButton.addEventListener('click', () => loadRuleLogs({ reset: true }));
-  elements.loadMoreLogs.addEventListener('click', () => loadRuleLogs());
+  elements.historyPrevPage?.addEventListener('click', () => goToHistoryPage(historyPage - 1));
+  elements.historyNextPage?.addEventListener('click', () => goToHistoryPage(historyPage + 1));
+  elements.historyRefreshHint?.addEventListener('click', () => {
+    historyLoaded = false;
+    loadHistory({ reset: true });
+  });
   elements.reloadRuntimeLogsButton.addEventListener('click', () => loadRuntimeLogs({ reset: true }));
   elements.loadMoreRuntimeLogs.addEventListener('click', () => loadRuntimeLogs());
   elements.runtimeLogEnabled.addEventListener('change', (event) => {
@@ -3554,6 +3930,7 @@ globalThis.addEventListener('pagehide', () => {
   if (historyDomainTimer !== null) globalThis.clearTimeout(historyDomainTimer);
   if (dohAppSearchTimer !== null) globalThis.clearTimeout(dohAppSearchTimer);
   stopDohRefresh();
+  stopHistoryPulse();
   if (prewarmIdleHandle !== null && typeof globalThis.cancelIdleCallback === 'function') {
     globalThis.cancelIdleCallback(prewarmIdleHandle);
     prewarmIdleHandle = null;
@@ -3564,8 +3941,13 @@ globalThis.addEventListener('pagehide', () => {
 }, { once: true });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) stopDohRefresh();
-  else scheduleDohRefresh();
+  if (document.hidden) {
+    stopDohRefresh();
+    stopHistoryPulse();
+  } else {
+    scheduleDohRefresh();
+    scheduleHistoryPulse();
+  }
 });
 
 start();

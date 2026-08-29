@@ -514,9 +514,19 @@ config_migrate_v2_registry() {
   }
 }
 
+# 规则日志已经取消。旧版本留下的档位偏好和 rule-engine.log 不会再有任何读者，
+# 升级后放着只是白占空间，所以在引导时一次性删掉：每次开机四条 rm，不进任何热路径。
+config_prune_removed_features() {
+  rm -f "$CONFIG_DIR/log-mode.prop" 2>/dev/null || true
+  rm -f "$RULE_RUNTIME/logs/rule-engine.log" 2>/dev/null || true
+  rm -f "$RULE_RUNTIME/logs/rule-engine.log.1" 2>/dev/null || true
+  rm -f "$RULE_RUNTIME/logs/rule-engine.log.2" 2>/dev/null || true
+}
+
 config_bootstrap() {
   local revision tmp
   rules_init_paths "$MODDIR" || return
+  config_prune_removed_features
   preferences_bootstrap || return
   if [ -f "$CONFIG_DIR/current.prop" ]; then
     if config_current_revision >/dev/null 2>&1; then
@@ -871,12 +881,6 @@ config_import_validate_notice_file() {
   preferences_validate_notice_file "$1"
 }
 
-config_import_validate_log_mode_file() {
-  [ -f "$1" ] && [ ! -L "$1" ] || return 66
-  config_import_file_size_le "$1" 64 || return
-  preferences_validate_log_mode_file "$1"
-}
-
 config_import_validate_history_file() {
   local file=$1
   [ -f "$file" ] && [ ! -L "$file" ] || return 66
@@ -996,14 +1000,14 @@ config_import_stage_app_policy() {
 
 config_import_active() {
   [ "$#" -eq 1 ] || return 64
-  local old_dir=$1 active_dir=${CONFIG_ACTIVE_MODULE:-/data/adb/modules/jingjie_hosts/config}
+  local old_dir=$1 active_dir=${CONFIG_ACTIVE_MODULE:-/data/adb/modules/zhulong_hosts/config}
   local rev expected actual embedded old_snapshot format tmp final meta_tmp pointer_tmp mode mode_tmp result source_file
   local migrated_file cleanup_file installed_files=
   [ "$old_dir" = "$active_dir" ] || return 64
   [ -d "$old_dir" ] && [ ! -L "$old_dir" ] || return 66
   [ "$CONFIG_DIR" != "$old_dir" ] || return 64
   [ ! -e "$CONFIG_DIR/current.prop" ] || return 76
-  for migrated_file in mode.prop notice.prop log-mode.prop history.conf refresh.conf \
+  for migrated_file in mode.prop notice.prop history.conf refresh.conf \
     app-policy.prop app-policy-uids.tsv app-policy-ips.tsv; do
     [ ! -e "$CONFIG_DIR/$migrated_file" ] && [ ! -L "$CONFIG_DIR/$migrated_file" ] || return 76
   done
@@ -1039,9 +1043,6 @@ config_import_active() {
   [ ! -e "$meta_tmp" ] && [ ! -L "$meta_tmp" ] || return 76
   mkdir -p "$tmp" "$meta_tmp" || return 73
   config_import_stage_valid_file "$old_dir" "$meta_tmp" notice.prop config_import_validate_notice_file || {
-    result=$?; rm -rf "$tmp" "$meta_tmp"; return "$result"
-  }
-  config_import_stage_valid_file "$old_dir" "$meta_tmp" log-mode.prop config_import_validate_log_mode_file || {
     result=$?; rm -rf "$tmp" "$meta_tmp"; return "$result"
   }
   config_import_stage_valid_file "$old_dir" "$meta_tmp" history.conf config_import_validate_history_file || {
@@ -1090,7 +1091,7 @@ config_import_active() {
     rm -rf "$final" "$meta_tmp"
     return "$result"
   }
-  for migrated_file in notice.prop log-mode.prop history.conf refresh.conf \
+  for migrated_file in notice.prop history.conf refresh.conf \
     app-policy.prop app-policy-uids.tsv app-policy-ips.tsv; do
     [ -f "$meta_tmp/$migrated_file" ] && [ ! -L "$meta_tmp/$migrated_file" ] || continue
     atomic_replace_file "$meta_tmp/$migrated_file" "$CONFIG_DIR/$migrated_file" || {

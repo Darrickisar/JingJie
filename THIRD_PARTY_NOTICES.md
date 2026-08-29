@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-The `jingjie-doh-proxy` executable includes third-party Go modules in its
+The `zhulong-doh-proxy` executable includes third-party Go modules in its
 statically linked dependency graph. Versions below are pinned by `go.mod` and
 `go.sum`.
 

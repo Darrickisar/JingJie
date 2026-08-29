@@ -1,15 +1,27 @@
 import { BridgeError, execBridge } from './bridge.js';
 
-const API_SCRIPT = "/system/bin/sh '/data/adb/modules/jingjie_hosts/webui_api.sh'";
+const API_SCRIPT = "/system/bin/sh '/data/adb/modules/zhulong_hosts/webui_api.sh'";
 const DEFAULT_TIMEOUT_MS = 10_000;
-const DEFAULT_POLL_MS = 650;
+// 稳定期的轮询间隔，也是 pollOperation 的上限：调用方传更小的值仍然按小的走。
+const DEFAULT_POLL_MS = 2_000;
 // 大多数操作一两秒内就结束，前几轮用更短的间隔让按钮更快恢复；
-// 之后退回固定间隔，长任务才不会被刷成高频轮询。
-const POLL_RAMP_MS = [120, 200, 320, 480];
+// 之后一路退让到 DEFAULT_POLL_MS，长任务才不会被刷成高频轮询。
+// 每一轮都是一次 status 调用，也就是在手机上重新拉起一个 shell：
+// 从前四轮之后就固定 650ms，一次十几秒的保存要拉起三四十个 shell，
+// 这笔开销随操作时长线性增长，正是「点一下按钮就更费电」里看不见的那一半。
+// 继续退让不影响短操作的手感——前四轮的节奏一个字都没改。
+const POLL_RAMP_MS = [120, 200, 320, 480, 650, 900, 1200, 1600];
 const SOURCE_ID = /^(?:awa|rule10007|custom_(?!0+$)[0-9]{1,57})$/;
 const OPERATION_ID = /^op_[A-Za-z0-9_-]+$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const CURSOR = /^[0-9]{1,18}$/;
+
+// 第 attempt 轮（从 0 起）该等多久。app.js 里跟随后台的那两个轮询循环共用这条曲线，
+// 免得同一个「每轮一次 status」的代价在三处各定一套节奏。
+export function pollBackoffMs(attempt) {
+  const index = Number.isInteger(attempt) && attempt > 0 ? attempt : 0;
+  return index < POLL_RAMP_MS.length ? POLL_RAMP_MS[index] : DEFAULT_POLL_MS;
+}
 
 export class ApiError extends Error {
   constructor(code, message, details = {}) {
@@ -111,7 +123,6 @@ function validateArgs(verb, args) {
     case 'overrides':
     case 'rules-bundle':
     case 'notice-status':
-    case 'log-mode':
     case 'runtime-log-mode':
     case 'clear-runtime-logs':
     case 'export-runtime-logs':
@@ -119,6 +130,7 @@ function validateArgs(verb, args) {
     case 'app-capability':
     case 'app-policy':
     case 'history-status':
+    case 'history-pulse':
     case 'history-apps':
     case 'refresh':
     case 'pause':
@@ -195,6 +207,8 @@ function validateArgs(verb, args) {
     case 'clear-cache':
       count(0);
       break;
+    // history-bundle 的参数形状和 history 完全一致，共用同一套校验。
+    case 'history-bundle':
     case 'history': {
       count(6);
       if (!CURSOR.test(args[0]) || Number(args[0]) > 50000) invalid('invalid history cursor');
@@ -273,17 +287,12 @@ function validateArgs(verb, args) {
       count(1);
       boolean(args[0]);
       break;
-    case 'set-log-mode':
-      count(1);
-      if (!['off', 'blocked_error', 'all'].includes(args[0])) invalid('invalid log mode');
-      break;
     case 'set-app-policy':
       count(3);
       if (!['off', 'block_selected', 'allow_resolved'].includes(args[0])) invalid('invalid app policy mode');
       listEncoded(args[1]);
       listEncoded(args[2]);
       break;
-    case 'logs':
     case 'runtime-logs': {
       count(2);
       if (!CURSOR.test(args[0])) invalid('invalid log cursor');
@@ -344,7 +353,9 @@ export function encodeBase64Bytes(bytes) {
 export async function execApi(verb, args = [], { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   validateArgs(verb, args);
   const shellArgs = args.map((arg, index) => {
-    const value = verb === 'history' && index >= 3 && arg === '-' ? 'none' : arg;
+    // 尾部的可选筛选位用 none 占位，避免裸 '-' 被 shell 当成选项。
+    const positional = verb === 'history' || verb === 'history-bundle';
+    const value = positional && index >= 3 && arg === '-' ? 'none' : arg;
     return value === '' ? "''" : value;
   });
   const command = [API_SCRIPT, verb, ...shellArgs].join(' ');
@@ -414,7 +425,7 @@ export async function pollOperation(operationId, onStatus, signal, {
       }
       return status;
     }
-    const ramped = attempt < POLL_RAMP_MS.length ? POLL_RAMP_MS[attempt] : pollMs;
+    const ramped = pollBackoffMs(attempt);
     attempt += 1;
     await delay(Math.min(ramped, pollMs), signal);
   }

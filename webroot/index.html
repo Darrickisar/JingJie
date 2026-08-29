@@ -4,17 +4,18 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="light dark">
-    <title>净界 · 规则控制台</title>
+    <title>烛龙 · 规则控制台</title>
+    <link rel="icon" href="./logo.png" type="image/png">
     <link rel="stylesheet" href="./internal/insets.css">
     <link rel="stylesheet" href="./app.css">
   </head>
   <body>
     <!--
-      THESIS: 净界 5.0 是安静可信的系统级防护平台，状态优先、数据卡片化、操作胶囊化。
+      THESIS: 烛龙 5.0 是安静可信的系统级防护平台，状态优先、数据卡片化、操作胶囊化。
       OWN-WORLD: 三主题体系（经典 / 暗色 / 液态玻璃）共用同一套语义令牌；液态玻璃提供半透明层、柔光光斑与高光边缘。
       STORY: 用户先确认保护状态与规则规模，再进入规则、应用、日志逐层处理，最后在设置里调整外观与偏好。
       FIRST VIEWPORT: 品牌栏保留实时状态，状态 Hero 与关键数据并排，策略工作区与来源健康度随后展开。
-      FORM: 悬浮胶囊底部导航 + 分层卡片；seed key jingjie-console-glass-05。
+      FORM: 悬浮胶囊底部导航 + 分层卡片；seed key zhulong-console-glass-05。
       FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
     -->
     <a class="skip-link" href="#workspace">跳到主要内容</a>
@@ -25,7 +26,7 @@
       <span class="ambient-orb ambient-orb-c"></span>
     </div>
     <svg class="liquid-filter-defs" width="0" height="0" aria-hidden="true" focusable="false">
-      <filter id="jingjie-liquid-refraction" x="-12%" y="-12%" width="124%" height="124%" color-interpolation-filters="sRGB">
+      <filter id="zhulong-liquid-refraction" x="-12%" y="-12%" width="124%" height="124%" color-interpolation-filters="sRGB">
         <feTurbulence type="fractalNoise" baseFrequency="0.006 0.012" numOctaves="2" seed="9" result="liquid-noise"></feTurbulence>
         <feGaussianBlur in="liquid-noise" stdDeviation="7" result="liquid-field"></feGaussianBlur>
         <feDisplacementMap in="SourceGraphic" in2="liquid-field" scale="11" xChannelSelector="R" yChannelSelector="G"></feDisplacementMap>
@@ -37,13 +38,9 @@
           <div class="brand-cluster">
             <div class="brand-block">
               <div class="brand-mark" aria-hidden="true">
-                <svg class="brand-logo" viewBox="0 0 48 48" focusable="false">
-                  <path class="brand-logo-shield" d="M24 3.5 40 9.4v11.1c0 10.6-6.7 19.2-16 24-9.3-4.8-16-13.4-16-24V9.4z"></path>
-                  <path class="brand-logo-rule" d="M15 17.5h18M15 24h18M15 30.5h10"></path>
-                  <circle class="brand-logo-dot" cx="31.5" cy="30.5" r="2.5"></circle>
-                </svg>
+                <img class="brand-logo" src="./logo.png" alt="" width="192" height="192" decoding="async">
               </div>
-              <h1>净界</h1>
+              <h1>烛龙</h1>
             </div>
             <aside class="project-notice" aria-label="安全说明">
               <div class="project-origin">
@@ -391,21 +388,21 @@
 
           <section class="history-view" id="history-view" aria-labelledby="history-panel-heading" data-liquid-surface>
             <div class="section-heading log-section-heading">
-              <h3 id="history-panel-heading"><i data-lucide="history" aria-hidden="true"></i>拦截历史</h3>
+              <h3 id="history-panel-heading"><i data-lucide="history" aria-hidden="true"></i>拦截日志</h3>
             </div>
             <div class="history-status-rail" id="history-status-rail" data-tone="neutral">
               <div>
                 <div class="history-status-title-line">
-                  <h3 id="history-status-title">拦截历史未启用</h3>
+                  <h3 id="history-status-title">拦截日志未启用</h3>
                   <span class="history-state-chip" id="history-state-chip">默认关闭</span>
                   <button class="icon-button section-toggle" type="button" aria-controls="history-body" data-collapse-label="拦截记录" aria-expanded="true" aria-label="收起拦截记录" title="收起拦截记录">
                     <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
                   </button>
                 </div>
-                <p class="muted" id="history-status-detail">开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电；放行的连接抓不到，放行明细在下方「规则日志」。</p>
+                <p class="muted" id="history-status-detail">开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电；放行的连接抓不到。记录只保留最近 3 小时，更早的会自动删除。</p>
               </div>
               <label class="switch-label history-switch-label" for="history-enabled">
-                <input class="source-switch write-action" id="history-enabled" type="checkbox" role="switch" aria-label="记录拦截历史" aria-controls="history-details" aria-expanded="false" disabled>
+                <input class="source-switch write-action" id="history-enabled" type="checkbox" role="switch" aria-label="记录拦截日志" aria-controls="history-details" aria-expanded="false" disabled>
                 <span class="source-toggle" aria-hidden="true">
                   <span class="source-toggle-box"></span>
                   <span class="source-toggle-label source-toggle-off">未记录</span>
@@ -419,7 +416,7 @@
               <span id="history-count-summary">0 条连接</span>
             </div>
             <div class="history-details" id="history-details" hidden>
-            <div class="history-filters" aria-label="拦截历史筛选">
+            <div class="history-filters" aria-label="拦截日志筛选">
               <label class="history-filter-field" for="history-app-filter">
                 <span>应用</span>
                 <select id="history-app-filter" aria-label="应用筛选" disabled>
@@ -443,9 +440,9 @@
                 <span>时间</span>
                 <select id="history-time-filter" aria-label="时间范围" disabled>
                   <option value="0">全部记录</option>
+                  <option value="300">最近 5 分钟</option>
+                  <option value="1800">最近 30 分钟</option>
                   <option value="3600">最近 1 小时</option>
-                  <option value="86400">最近 24 小时</option>
-                  <option value="604800">最近 7 天</option>
                 </select>
               </label>
               <button class="button button-secondary history-clear-button write-action" id="clear-history-button" type="button" disabled>
@@ -453,47 +450,43 @@
                 <span>清空历史</span>
               </button>
             </div>
+            <button class="button button-secondary history-refresh-hint" id="history-refresh-hint" type="button" hidden>有新的拦截记录，点此刷新</button>
             <div class="history-list" id="history-list" aria-live="polite">
-              <p class="empty-state">打开此页面后读取拦截历史</p>
+              <p class="empty-state">打开此页面后读取拦截日志</p>
             </div>
-            <button class="button button-secondary load-more" id="load-more-history" type="button" hidden>加载更多拦截记录</button>
+            <div class="history-pager" id="history-pager" aria-label="拦截记录翻页" hidden>
+              <button class="button button-secondary" id="history-prev-page" type="button" aria-controls="history-list" disabled>
+                <i data-lucide="chevron-left" aria-hidden="true"></i>
+                <span>上一页</span>
+              </button>
+              <span class="history-page-status" id="history-page-status" aria-live="polite">第 1 页</span>
+              <button class="button button-secondary" id="history-next-page" type="button" aria-controls="history-list" disabled>
+                <span>下一页</span>
+                <i data-lucide="chevron-right" aria-hidden="true"></i>
+              </button>
+            </div>
             </div>
             </div>
           </section>
 
-          <section class="rule-log-view" id="rule-log-view" aria-labelledby="rule-log-heading" aria-busy="false" data-liquid-surface>
-            <div class="rule-log-heading">
+          <section class="log-card maintenance-view" id="maintenance-view" aria-labelledby="maintenance-heading" data-liquid-surface>
+            <div class="log-card-heading">
               <div>
-                <h3 id="rule-log-heading"><i data-lucide="scroll-text" aria-hidden="true"></i>规则日志</h3>
-                <p class="muted">仅在你手动载入时读取规则引擎文本记录，不会后台轮询。日志档位选「全部模块事件」后，每次刷新的放行与拦截明细都写在这里。</p>
+                <h3 id="maintenance-heading"><i data-lucide="wrench" aria-hidden="true"></i>维护</h3>
+                <p class="muted">环境检查会读一遍内核能力与挂载状态，用来判断某个功能是不是被系统挡住了。重置只在配置乱掉时用。</p>
               </div>
-              <button class="button button-secondary" id="reload-logs-button" type="button">
-                <i data-lucide="scroll-text" aria-hidden="true"></i>
-                <span>载入规则日志</span>
-              </button>
-              <button class="icon-button section-toggle" type="button" aria-controls="rule-log-body" data-collapse-label="规则日志" aria-expanded="true" aria-label="收起规则日志" title="收起规则日志">
+              <button class="icon-button section-toggle" type="button" aria-controls="maintenance-body" data-collapse-label="维护" aria-expanded="true" aria-label="收起维护" title="收起维护">
                 <i class="section-disclosure-icon" data-lucide="chevron-up" aria-hidden="true"></i>
               </button>
             </div>
-            <div class="collapsible-body" id="rule-log-body">
+            <div class="collapsible-body" id="maintenance-body">
               <div class="maintenance-controls" id="maintenance-strip">
-                <label for="log-mode-select">
-                  <span>日志档位</span>
-                  <select id="log-mode-select" disabled>
-                    <option value="off">关闭额外日志</option>
-                    <option value="blocked_error">仅拦截与错误</option>
-                    <option value="all">全部模块事件</option>
-                  </select>
-                </label>
-                <button class="button button-secondary write-action" id="save-log-mode-button" type="button" disabled>保存日志档位</button>
                 <button class="button button-secondary" id="diagnostics-button" type="button" disabled>
                   <i data-lucide="gauge" aria-hidden="true"></i>
                   <span>环境检查</span>
                 </button>
               </div>
               <section class="diagnostics-result" id="diagnostics-result" aria-live="polite" aria-busy="false" hidden></section>
-              <pre class="log-output" id="log-output" tabindex="0">尚未载入规则日志</pre>
-              <button class="button button-secondary load-more" id="load-more-logs" type="button" hidden>加载更多规则日志</button>
               <hr class="section-divider">
               <div class="danger-zone" id="danger-zone">
                 <div class="danger-zone-copy">
@@ -505,8 +498,8 @@
             </div>
           </section>
 
-          <section class="rule-log-view runtime-log-view" id="runtime-log-view" aria-labelledby="runtime-log-heading" aria-busy="false" data-liquid-surface>
-            <div class="rule-log-heading">
+          <section class="log-card runtime-log-view" id="runtime-log-view" aria-labelledby="runtime-log-heading" aria-busy="false" data-liquid-surface>
+            <div class="log-card-heading">
               <div>
                 <h3 id="runtime-log-heading"><i data-lucide="monitor" aria-hidden="true"></i>运行日志</h3>
                 <p class="muted">记录加密 DNS、防火墙、伴随进程等各功能的运行过程与失败原因，用来定位「某个功能开不起来」到底卡在哪一步。失败记录始终写入，关闭开关只停掉每步成功的明细。</p>
@@ -765,7 +758,7 @@
               <dl class="about-list">
                 <div>
                   <dt>模块</dt>
-                  <dd>净界 · HOSTS 规则引擎</dd>
+                  <dd>烛龙</dd>
                 </div>
                 <div>
                   <dt>版本</dt>
@@ -777,7 +770,7 @@
                 </div>
                 <div>
                   <dt>兼容</dt>
-                  <dd>KernelSU · KernelSU Next · APatch</dd>
+                  <dd>KernelSU 及其分支</dd>
                 </div>
               </dl>
               <div class="about-actions">
@@ -793,7 +786,7 @@
       </main>
 
       <div class="control-bar">
-        <nav class="tab-bar" role="tablist" aria-label="净界五区导航">
+        <nav class="tab-bar" role="tablist" aria-label="烛龙五区导航">
           <button class="tab-button is-active" id="tab-overview" type="button" role="tab" aria-selected="true" aria-controls="panel-overview">
             <i data-lucide="house" aria-hidden="true"></i>
             <span>首页<small class="tab-alias">概览</small></span>
@@ -882,7 +875,7 @@
             <i data-lucide="x" aria-hidden="true"></i>
           </button>
         </div>
-        <p>暂停后将停止 hosts 规则过滤，直到你主动恢复保护。当前规则版本和模式会保留，恢复时不会重新下载规则。</p>
+        <p>暂停后一切都会停下来：hosts 规则过滤、自动刷新、加密 DNS、分应用规则，直到你主动恢复保护。规则缓存与历史版本会一并删除，恢复时需要重新下载规则，也不再能回滚到上一版。来源、名单、模式等配置都会保留。</p>
         <div class="dialog-actions">
           <button class="button button-secondary" type="button" data-close-dialog>取消</button>
           <button class="button button-danger write-action" id="confirm-pause-button" type="submit">确认</button>
@@ -893,7 +886,7 @@
     <dialog id="clear-history-dialog" aria-labelledby="clear-history-dialog-title">
       <form method="dialog" id="clear-history-form">
         <div class="dialog-heading">
-          <h2 id="clear-history-dialog-title">清空拦截历史</h2>
+          <h2 id="clear-history-dialog-title">清空拦截日志</h2>
           <button class="icon-button" type="button" data-close-dialog aria-label="关闭" title="关闭">
             <i data-lucide="x" aria-hidden="true"></i>
           </button>

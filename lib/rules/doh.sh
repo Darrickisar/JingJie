@@ -21,7 +21,7 @@ doh_init_paths() {
   DOH_TX_STAGED="$DOH_TX_DIR/staged"
   DOH_TX_MARKER="$DOH_TX_DIR/phase.prop"
   DOH_COMPANION_MANIFEST=${DOH_COMPANION_MANIFEST:-$MODDIR/assets/doh-companions.tsv}
-  DOH_COMPANION_TARGET=${DOH_COMPANION_TARGET:-$MODDIR/tools/jingjie_doh_proxy}
+  DOH_COMPANION_TARGET=${DOH_COMPANION_TARGET:-$MODDIR/tools/zhulong_doh_proxy}
   DOH_COMPANION_BUNDLE_DIR=${DOH_COMPANION_BUNDLE_DIR:-$MODDIR/companions}
   export DOH_CONFIG_STATE DOH_CONFIG_ENDPOINT DOH_CONFIG_UIDS DOH_RUNTIME_DIR
   export DOH_RUNTIME_STATE DOH_LAST_TEST DOH_TX_DIR DOH_TX_PREVIOUS DOH_TX_STAGED DOH_TX_MARKER
@@ -77,7 +77,7 @@ doh_companion_fetch_android() {
   staged="$output.fetch"
   rm -f "$staged" "$staged.part"
   CLASSPATH="$dex" "$BB" timeout -s TERM -k 1 120 \
-    "$app_process" /system/bin --nice-name=jingjie-fetcher com.jingjie.RuleFetcher \
+    "$app_process" /system/bin --nice-name=zhulong-fetcher com.zhulong.RuleFetcher \
     "$url" "$staged" "$maximum" 10000 30000 >/dev/null 2>&1 || {
       rm -f "$staged" "$staged.part"
       return 74
@@ -102,7 +102,7 @@ doh_companion_download() {
   [ "$#" -eq 3 ] || return 64
   local url=$1 output=$2 maximum=$3 actual_size limit result=69
   limit=$((maximum + 1))
-  case "$url" in https://github.com/Darrickisar/JingJie/releases/download/v1.0/*) ;; *) return 65 ;; esac
+  case "$url" in https://github.com/Darrickisar/ZhuLong/releases/download/v1.0/*) ;; *) return 65 ;; esac
   [ -f "$output" ] && [ ! -L "$output" ] || return 66
   if command -v curl >/dev/null 2>&1; then
     if (set -o pipefail; curl --fail --location --proto '=https' --connect-timeout 10 --max-time 30 --output - "$url" | "$BB" head -c "$limit" > "$output"); then
@@ -144,8 +144,8 @@ doh_companion_ensure() {
   IFS="$tab" read -r _ asset url gzip_size gzip_hash binary_size binary_hash machine <<EOF
 $row
 EOF
-  case "$asset" in "jingjie-doh-proxy-$arch-v1.0.gz") ;; *) return 65 ;; esac
-  case "$url" in "https://github.com/Darrickisar/JingJie/releases/download/v1.0/$asset") ;; *) return 65 ;; esac
+  case "$asset" in "zhulong-doh-proxy-$arch-v1.0.gz") ;; *) return 65 ;; esac
+  case "$url" in "https://github.com/Darrickisar/ZhuLong/releases/download/v1.0/$asset") ;; *) return 65 ;; esac
   case "$gzip_size:$binary_size:$machine" in *[!0-9:]*|:*|*::*) return 65 ;; esac
   case "$gzip_hash:$binary_hash" in *[!0-9a-f:]*|????????????????????????????????????????????????????????????????:????????????????????????????????????????????????????????????????) ;; *) return 65 ;; esac
   [ "$gzip_size" -le "$DOH_COMPANION_MAX_GZIP_BYTES" ] && [ "$binary_size" -le "$DOH_COMPANION_MAX_BINARY_BYTES" ] || return 65
@@ -174,7 +174,7 @@ EOF
     doh_companion_download "$url" "$download" "$gzip_size" || { result=$?; rm -f "$download"; return "$result"; }
   fi
   doh_companion_file_integrity_validate "$download" "$gzip_size" "$gzip_hash" || { rm -f "$download"; return 65; }
-  binary=$("$BB" mktemp "$MODDIR/tools/.jingjie_doh_proxy.XXXXXX") || { rm -f "$download"; return 74; }
+  binary=$("$BB" mktemp "$MODDIR/tools/.zhulong_doh_proxy.XXXXXX") || { rm -f "$download"; return 74; }
   [ -f "$binary" ] && [ ! -L "$binary" ] || { rm -f "$download" "$binary"; return 65; }
   "$BB" gzip -dc "$download" > "$binary" 2>/dev/null || { rm -f "$download" "$binary"; return 65; }
   rm -f "$download"

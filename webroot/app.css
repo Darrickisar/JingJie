@@ -1,4 +1,4 @@
-/* 净界 Web UI 5.0 — 语义令牌层
+/* 烛龙 Web UI 5.0 — 语义令牌层
    外观由两条互不干扰的轴组成：
      data-surface = classic | liquid   （界面材质）
      data-scheme  = light | dark | system （明暗）
@@ -122,10 +122,14 @@
   --space-6: 24px;
   --space-8: 32px;
   --motion: cubic-bezier(0.16, 1, 0.3, 1);
-  --jingjie-safe-top: max(var(--safe-area-inset-top, 0px), env(safe-area-inset-top, 0px), var(--jingjie-host-inset-top, 0px));
-  --jingjie-safe-right: max(var(--safe-area-inset-right, 0px), env(safe-area-inset-right, 0px), var(--jingjie-host-inset-right, 0px));
-  --jingjie-safe-bottom: max(var(--safe-area-inset-bottom, 0px), env(safe-area-inset-bottom, 0px), var(--jingjie-host-inset-bottom, 0px));
-  --jingjie-safe-left: max(var(--safe-area-inset-left, 0px), env(safe-area-inset-left, 0px), var(--jingjie-host-inset-left, 0px));
+  /* 页签切换单独用一条曲线。--motion 是 expo-out（y1=1），冲进来再急停，
+     配上十几像素的位移就是那种「蹦一下」的观感。这条是标准减速曲线，
+     没有末段急停，也不过冲。其余 24 处仍用 --motion，弹窗与吐司的手感不变。 */
+  --motion-panel: cubic-bezier(0.4, 0, 0.2, 1);
+  --zhulong-safe-top: max(var(--safe-area-inset-top, 0px), env(safe-area-inset-top, 0px), var(--zhulong-host-inset-top, 0px));
+  --zhulong-safe-right: max(var(--safe-area-inset-right, 0px), env(safe-area-inset-right, 0px), var(--zhulong-host-inset-right, 0px));
+  --zhulong-safe-bottom: max(var(--safe-area-inset-bottom, 0px), env(safe-area-inset-bottom, 0px), var(--zhulong-host-inset-bottom, 0px));
+  --zhulong-safe-left: max(var(--safe-area-inset-left, 0px), env(safe-area-inset-left, 0px), var(--zhulong-host-inset-left, 0px));
   font-family: "Segoe UI Variable Text", "MiSans", "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
   font-size: 16px;
   letter-spacing: 0;
@@ -602,8 +606,8 @@ h3 {
 .skip-link {
   position: fixed;
   z-index: 20;
-  top: max(8px, var(--jingjie-safe-top));
-  left: max(12px, var(--jingjie-safe-left));
+  top: max(8px, var(--zhulong-safe-top));
+  left: max(12px, var(--zhulong-safe-left));
   min-height: 44px;
   display: inline-flex;
   align-items: center;
@@ -631,10 +635,10 @@ h3 {
   width: min(100%, 1120px);
   min-height: 100vh;
   margin: 0 auto;
-  padding-top: max(24px, var(--jingjie-safe-top));
-  padding-right: max(20px, var(--jingjie-safe-right));
-  padding-bottom: calc(var(--nav-reserve) + var(--jingjie-safe-bottom));
-  padding-left: max(20px, var(--jingjie-safe-left));
+  padding-top: max(24px, var(--zhulong-safe-top));
+  padding-right: max(20px, var(--zhulong-safe-right));
+  padding-bottom: calc(var(--nav-reserve) + var(--zhulong-safe-bottom));
+  padding-left: max(20px, var(--zhulong-safe-left));
 }
 
 .app-chrome {
@@ -690,31 +694,37 @@ h3 {
   place-items: center;
   flex: 0 0 40px;
   overflow: hidden;
-  border: 1px solid #132019;
+  /* 不加底衬与边框：新 logo 四周整片透明，填一层背景或描一道边，等于把透明区
+     域涂成一个方块。旧盾牌 SVG 需要底衬（它只是个单色路径），这张位图不需要。 */
+  border: 0;
   border-radius: var(--radius-md);
-  background: #132019;
-  box-shadow: 0 9px 22px rgba(15, 29, 22, 0.16);
+  background: transparent;
+  box-shadow: none;
 }
 
+/* 品牌标记现在是位图（webroot/logo.png），不再是内联 SVG，
+   所以 fill/stroke 一类规则不再适用；容器 40×40，图按比例铺满。 */
 .brand-logo {
   width: 100%;
   height: 100%;
   display: block;
+  object-fit: contain;
 }
 
-.brand-logo-shield {
-  fill: var(--accent);
+/* 深色下提亮 logo。这张图 98.4% 的墨色落在 L<0.125，浅色底上很清楚（94% 的墨
+   达到 3:1），但在深色表面上只剩 1%，整条龙糊进背景，只看得见红印和那点眼睛。
+   brightness() 治不了：乘一个接近 0 的值仍然接近 0，放大到 4 倍也只有 48% 达标，
+   还会把浅色主题从 94% 压到 56%。invert 才对症——它把近黑映到近白（96% 达标），
+   再用 hue-rotate(180deg) 把色相转回去，红印保持在 10°（原图 7°），不会翻成青色。
+   只在深色下加，浅色主题不要碰：同一条滤镜在白底上会把达标率打到 1%。 */
+:root[data-scheme="dark"] .brand-logo {
+  filter: invert(1) hue-rotate(180deg);
 }
 
-.brand-logo-rule {
-  fill: none;
-  stroke: #ffffff;
-  stroke-linecap: round;
-  stroke-width: 2.4;
-}
-
-.brand-logo-dot {
-  fill: #ccf3df;
+@media (prefers-color-scheme: dark) {
+  :root[data-scheme="system"] .brand-logo {
+    filter: invert(1) hue-rotate(180deg);
+  }
 }
 
 .project-notice {
@@ -801,9 +811,9 @@ h3 {
   left: 0;
   min-width: 0;
   justify-content: center;
-  padding-right: max(12px, var(--jingjie-safe-right));
-  padding-bottom: calc(var(--nav-gap) + var(--jingjie-safe-bottom));
-  padding-left: max(12px, var(--jingjie-safe-left));
+  padding-right: max(12px, var(--zhulong-safe-right));
+  padding-bottom: calc(var(--nav-gap) + var(--zhulong-safe-bottom));
+  padding-left: max(12px, var(--zhulong-safe-left));
   pointer-events: none;
 }
 
@@ -840,7 +850,8 @@ h3 {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent);
   pointer-events: none;
   transform: translate3d(var(--active-tab-offset), 0, 0);
-  transition: transform 210ms var(--motion);
+  /* 滑块和面板用同一条曲线，否则一个急停一个平滑，整体仍然显得顿。 */
+  transition: transform 220ms var(--motion-panel);
   will-change: transform;
 }
 
@@ -886,7 +897,9 @@ h3 {
 /* 切页时底栏背后的像素每帧都在变，位移滤镜就得跟着每帧重算一遍整块背景。
    入场动画这两百多毫秒里把折射层摘掉：它本来就压在模糊层上、透明度只有 0.6，
    一次滑动里看不出来，省下的却是切页最贵的一笔合成开销。
-   环境光斑同理先停帧，它们只是背景装饰。 */
+   环境光斑同理先停帧，它们只是背景装饰。
+   注意 data-switching 现在只在「液态 + 浓郁」下才会被设置（见 app.js 的
+   markPanelSwitch）——那是唯一真的需要它的组合。 */
 :root[data-switching][data-glass="strong"] .tab-bar::before {
   display: none;
 }
@@ -895,19 +908,15 @@ h3 {
   animation-play-state: paused;
 }
 
-/* 上面只摘掉了「浓郁」档位的折射层，纯模糊那一笔一直没管：切页那两百多毫秒里
-   面板正在做 translate3d，底栏与卡片背后的像素每帧都在变，backdrop-filter 就得
-   每帧重新采样并模糊一遍整块背景。它是 WebView 里最贵的合成操作，而且轻透/标准
-   两档同样在付这笔钱。
-   位移动画本身就会把这点模糊差异盖掉，所以切页期间一律降为无模糊；材质的半透明
-   填充仍在，观感不塌。 */
-:root[data-switching][data-surface="liquid"] .tab-bar,
-:root[data-switching][data-surface="liquid"] .app-chrome,
-:root[data-switching][data-surface="liquid"] #status-rail,
-:root[data-switching][data-surface="liquid"] [data-liquid-surface] {
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
-}
+/* 这里原来还有一组「切页途中把 backdrop-filter 降为 none」的规则，已删除。
+   它的本意是省下模糊的合成开销，但实测是净亏的：
+     切换途中保留模糊  recalc 28ms + layout 10ms = 38ms/次
+     完全不设该属性    recalc 20ms + layout 10ms = 30ms/次
+     原状（摘模糊）    recalc 32ms + layout 16ms = 47ms/次
+   原因有两条：一是 :root 上的属性开关会让整棵树的样式失效；二是把
+   backdrop-filter 在 blur() 与 none 之间来回改，等于让合成器一次切换里
+   拆建两次 backdrop root。省下的那点采样远不够抵这两笔。
+   附带好处是玻璃不再「闪一下」——顶栏、状态条与卡片过去和底栏一样会闪。 */
 
 :root[data-surface="liquid"][data-glass="strong"] .tab-bar::before {
   content: "";
@@ -915,8 +924,8 @@ h3 {
   z-index: 0;
   inset: 0;
   border-radius: inherit;
-  -webkit-backdrop-filter: url(#jingjie-liquid-refraction);
-  backdrop-filter: url(#jingjie-liquid-refraction);
+  -webkit-backdrop-filter: url(#zhulong-liquid-refraction);
+  backdrop-filter: url(#zhulong-liquid-refraction);
   opacity: 0.6;
   pointer-events: none;
 }
@@ -949,7 +958,7 @@ h3 {
 }
 
 .tab-panel:not([hidden]):not([data-motion-direction]):not([data-prewarm]) {
-  animation: panel-enter 180ms var(--motion) both;
+  animation: panel-enter 200ms var(--motion-panel) both;
 }
 
 /* 预热态：离屏、不可见、不参与文档流，只为提前付掉首次样式解析与布局。 */
@@ -968,11 +977,11 @@ h3 {
 }
 
 .tab-panel[data-motion-direction="forward"]:not([hidden]) {
-  animation: panel-enter-forward 210ms var(--motion) both;
+  animation: panel-enter-forward 220ms var(--motion-panel) both;
 }
 
 .tab-panel[data-motion-direction="backward"]:not([hidden]) {
-  animation: panel-enter-backward 210ms var(--motion) both;
+  animation: panel-enter-backward 220ms var(--motion-panel) both;
 }
 
 /* 入场动画只动 transform 与 opacity，这两样能交给合成器。will-change 只在
@@ -984,8 +993,8 @@ h3 {
 
 @keyframes panel-enter {
   from {
-    opacity: 0.52;
-    transform: translate3d(0, 6px, 0);
+    opacity: 0.6;
+    transform: translate3d(0, 3px, 0);
   }
 }
 
@@ -997,17 +1006,20 @@ h3 {
    只留 translate 与 opacity，既是合成器友好的两个属性，也不动任何实测尺寸。
    前进从下方来、后退从上方来，方向感靠这个区分。 */
 
+/* 位移从 14px 收到 5px、起始不透明度从 0.28 提到 0.45：
+   距离短了、对比小了，观感就从「弹进来」变成「淡入落定」。
+   方向感仍然保留（前进自下、后退自上），只是幅度收敛。 */
 @keyframes panel-enter-forward {
   from {
-    opacity: 0.28;
-    transform: translate3d(0, 14px, 0);
+    opacity: 0.45;
+    transform: translate3d(0, 5px, 0);
   }
 }
 
 @keyframes panel-enter-backward {
   from {
-    opacity: 0.28;
-    transform: translate3d(0, -14px, 0);
+    opacity: 0.45;
+    transform: translate3d(0, -5px, 0);
   }
 }
 
@@ -1916,7 +1928,8 @@ h3 {
 .source-switch:checked + .source-toggle .source-toggle-box {
   border-color: var(--accent);
   background: var(--accent);
-  box-shadow: 0 2px 5px rgba(23, 107, 80, 0.2);
+  /* 阴影跟着 accent 走，不再写死那支绿。 */
+  box-shadow: 0 2px 5px color-mix(in srgb, var(--accent) 26%, transparent);
 }
 
 .source-switch:checked + .source-toggle .source-toggle-box::after {
@@ -2319,7 +2332,36 @@ dialog input[aria-invalid] {
   margin: 12px 18px 18px;
 }
 
-.rule-log-view {
+/* 翻页期间探到新记录时的提示。放在列表上方，点一下回到第一页。 */
+.history-refresh-hint {
+  width: calc(100% - 36px);
+  margin: 0 18px 12px;
+}
+
+/* 翻页条。列表一次只挂一页，靠这里前后翻——切到别的底栏时不用销毁上千个节点，
+   那正是「切走时卡一下」的来源。 */
+.history-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 18px 18px;
+}
+
+.history-pager .button {
+  flex: none;
+}
+
+.history-page-status {
+  min-width: 0;
+  flex: 1 1 auto;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-card {
   min-width: 0;
   margin-top: var(--space-5);
   padding: 18px;
@@ -2332,36 +2374,36 @@ dialog input[aria-invalid] {
   contain-intrinsic-size: auto 360px;
 }
 
-.rule-log-heading {
+.log-card-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
 }
 
-.rule-log-heading > div {
+.log-card-heading > div {
   min-width: 0;
 }
 
-.rule-log-heading h3,
-.rule-log-heading p {
+.log-card-heading h3,
+.log-card-heading p {
   margin: 0;
 }
 
-.rule-log-heading p {
+.log-card-heading p {
   margin-top: 4px;
 }
 
 /* 三个日志分区的标题统一带一个图示，便于在同一页里快速区分。 */
 
-.rule-log-heading h3,
+.log-card-heading h3,
 .log-section-heading h3 {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.rule-log-heading h3 svg,
+.log-card-heading h3 svg,
 .log-section-heading h3 svg {
   width: 18px;
   height: 18px;
@@ -2423,10 +2465,11 @@ dialog input[aria-invalid] {
   margin: 16px 0 0;
   padding: 16px;
   overflow: auto;
-  border: 1px solid #39443f;
+  /* 这三个原本是写死的青绿系控制台色，改走令牌，跟随暖石中性色。 */
+  border: 1px solid var(--console-line);
   border-radius: var(--radius-md);
-  color: #dbe6e2;
-  background: #20282b;
+  color: var(--console-muted);
+  background: var(--console);
   font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 0.78rem;
   line-height: 1.65;
@@ -2434,7 +2477,7 @@ dialog input[aria-invalid] {
   overflow-wrap: anywhere;
 }
 
-.rule-log-view .load-more {
+.log-card .load-more {
   width: 100%;
   margin: 12px 0 0;
 }
@@ -2959,8 +3002,11 @@ dialog form {
 
 .toast-region {
   position: fixed;
-  right: max(16px, var(--jingjie-safe-right));
-  bottom: max(16px, var(--jingjie-safe-bottom));
+  right: max(16px, var(--zhulong-safe-right));
+  /* 抬到底栏之上。原来只留 16px + 安全区，正好压在底栏那一条上，
+     长文案的吐司会把「首页/规则/应用/日志/设置」挡掉。
+     --nav-reserve 是底栏高度加间距，安全区已在底栏自身计算里吸收。 */
+  bottom: calc(max(16px, var(--zhulong-safe-bottom)) + var(--nav-reserve));
   z-index: 20;
   width: min(420px, calc(100% - 32px));
   pointer-events: none;
@@ -2986,6 +3032,14 @@ dialog form {
 .toast-message > span:last-child {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* 液态主题下吐司也要有毛玻璃：--liquid-toast 本身是半透明的，
+   不加模糊就只是「透出背景」而不是玻璃，和同屏的底栏、卡片材质不一致。 */
+:root[data-surface="liquid"] .toast-message {
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border-color: var(--hairline);
 }
 
 .toast-progress {
@@ -3062,8 +3116,8 @@ dialog form {
 
 @media (max-width: 760px) {
   .app-shell {
-    padding-right: max(14px, var(--jingjie-safe-right));
-    padding-left: max(14px, var(--jingjie-safe-left));
+    padding-right: max(14px, var(--zhulong-safe-right));
+    padding-left: max(14px, var(--zhulong-safe-left));
   }
 
   .brand-cluster {
@@ -3132,9 +3186,9 @@ dialog form {
 
 @media (max-width: 640px) {
   .app-shell {
-    padding-top: var(--jingjie-safe-top);
-    padding-right: max(12px, var(--jingjie-safe-right));
-    padding-left: max(12px, var(--jingjie-safe-left));
+    padding-top: var(--zhulong-safe-top);
+    padding-right: max(12px, var(--zhulong-safe-right));
+    padding-left: max(12px, var(--zhulong-safe-left));
   }
 
   .app-header {
@@ -3402,8 +3456,8 @@ dialog form {
   }
 
   .toast-region {
-    right: max(12px, var(--jingjie-safe-right));
-    left: max(12px, var(--jingjie-safe-left));
+    right: max(12px, var(--zhulong-safe-right));
+    left: max(12px, var(--zhulong-safe-left));
     width: auto;
   }
 }
@@ -3644,10 +3698,60 @@ dialog form {
   border-top: 1px solid var(--line);
 }
 
+/* 整行都是 label，点哪儿都能勾选，所以触控热区仍是 44×44 的 input 本身；
+   原生勾选框把这 44px 全画满了，一列大方块很压视觉。这里保留元素尺寸，
+   只把可见的方块收进中间 20px：透明边框留出热区，背景用 content-box 裁剪。 */
 .doh-app-row input {
+  position: relative;
   width: 44px;
   height: 44px;
   margin: 0;
+  box-sizing: border-box;
+  padding: 0;
+  border: 12px solid transparent;
+  border-radius: 18px;
+  appearance: none;
+  background-color: var(--surface-subtle);
+  background-origin: content-box;
+  background-clip: content-box;
+  box-shadow: inset 0 0 0 1px var(--control-line-strong);
+  cursor: pointer;
+}
+
+.doh-app-row input:checked {
+  background-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* 对勾用两条边旋转 45° 拼出来，跟着 --surface 走深浅主题。 */
+.doh-app-row input::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 5px;
+  border: 2px solid var(--surface);
+  border-top: 0;
+  border-right: 0;
+  border-radius: 1px;
+  transform: translate(-50%, -68%) rotate(-45deg);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.doh-app-row input:checked::before {
+  opacity: 1;
+}
+
+.doh-app-row input:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent);
+}
+
+.doh-app-row input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .doh-app-copy {
@@ -3744,20 +3848,21 @@ dialog form {
   display: grid;
 }
 
-/* 运行设置的控件已并入规则日志卡片，不再是独立分区，所以只保留栅格本身。 */
+/* 维护卡片里的按钮条。原来这里还有「日志档位」下拉与「保存日志档位」，
+   跟着规则日志一起取消了，现在只剩「环境检查」，所以不再撑成整行。 */
 
 .maintenance-controls {
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(200px, 1fr) repeat(2, auto);
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: end;
   margin-bottom: 14px;
 }
 
 /* 危险区域：独立低饱和红色分区。
-   它现在位于规则日志卡片内部、紧跟日志输出之后，所以要用一条分隔线和明确的
-   上间距把它推开——挨着日志框会让“重置规则配置”看着像日志的一部分。 */
+   它位于维护卡片内部、紧跟环境检查结果之后，所以要用一条分隔线和明确的
+   上间距把它推开——挨着上面的结果会让“重置规则配置”看着像检查的一部分。 */
 
 .danger-zone {
   min-width: 0;
@@ -3842,50 +3947,6 @@ dialog form {
   overflow-wrap: anywhere;
 }
 
-/* 运行设置的控件并入规则日志卡片后，选择器要跟着走：原来这两条挂在
-   .maintenance-strip 上，那个类已经不存在，于是日志档位下拉框退回成了浏览器
-   原生控件——没有描边、没有圆角，在卡片里显得格外突兀。 */
-
-.maintenance-controls label {
-  min-width: 0;
-  display: grid;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 700;
-}
-
-.maintenance-controls select {
-  min-height: 44px;
-  padding: 0 34px 0 12px;
-  border: 1px solid var(--control-line-strong);
-  border-radius: var(--radius-control);
-  color: var(--ink);
-  background: var(--surface-subtle);
-  box-shadow: inset 0 1px 0 rgba(16, 23, 19, 0.02);
-  font: inherit;
-  font-weight: 650;
-  /* 原生箭头在深色主题下是系统色，和卡片对不上；换成跟文字同色的自绘箭头。 */
-  appearance: none;
-  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
-    linear-gradient(135deg, currentColor 50%, transparent 50%);
-  background-position: calc(100% - 18px) calc(50% - 2px), calc(100% - 13px) calc(50% - 2px);
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
-}
-
-.maintenance-controls select:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--control-line-strong) 70%, var(--ink));
-  background-color: var(--surface);
-}
-
-.maintenance-controls select:focus {
-  border-color: var(--accent);
-  background-color: var(--surface);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 13%, transparent);
-  outline: 0;
-}
-
 .app-policy-controls select {
   grid-column: 1 / -1;
   padding: 0 12px;
@@ -3915,9 +3976,9 @@ dialog form {
 .notice-readonly {
   position: fixed;
   z-index: 40;
-  right: max(14px, var(--jingjie-safe-right));
-  bottom: calc(var(--nav-reserve) + var(--nav-gap) + var(--jingjie-safe-bottom));
-  left: max(14px, var(--jingjie-safe-left));
+  right: max(14px, var(--zhulong-safe-right));
+  bottom: calc(var(--nav-reserve) + var(--nav-gap) + var(--zhulong-safe-bottom));
+  left: max(14px, var(--zhulong-safe-left));
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
@@ -3990,8 +4051,11 @@ dialog form {
   }
 
   .maintenance-controls {
-    grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
+  }
+
+  .maintenance-controls .button {
+    width: 100%;
   }
 
   .danger-zone {
@@ -4003,12 +4067,12 @@ dialog form {
     gap: 4px;
   }
 
-  .rule-log-heading {
+  .log-card-heading {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .rule-log-heading .button,
+  .log-card-heading .button,
   .notice-readonly .button {
     width: 100%;
   }
@@ -4031,4 +4095,182 @@ dialog form {
     grid-template-columns: minmax(0, 1fr);
   }
 
+}
+
+/* ============================================================
+   ZHULONG-PALETTE — 秦制黑金
+   烛龙是秦将，绿色系是上一个名字留下的。这里只改品牌色相，
+   不动任何布局、间距、动效或语义结构。
+   附加在文件末尾而非逐条改写原声明：同特异性下后者生效，
+   整块删掉即可完整回退。
+   色相分离（避免暖色互撞）：danger 3 → warning 22 → accent 45 → success 150。
+   旧 warning 色相 39/40 与青铜 accent 几乎同色，故推向橙色。
+   对比度全部不低于替换前的绿色版本（其他脚本/contrast-check.ps1 可复核）。
+   ============================================================ */
+
+:root {
+  --accent: #7a5a1e;          /* 青铜金，对白 6.35:1（旧绿 5.34:1） */
+  --accent-strong: #5c4315;   /* 9.26:1 */
+  --accent-soft: #f2ebd9;
+  --accent-contrast: #ffffff;
+  --focus: #7a5a1e;
+  --warning: #b5480c;         /* 橙，色相 21，与 accent 分离 18° */
+  --warning-soft: #fdeade;
+}
+
+:root[data-scheme="dark"] {
+  --accent: #c9a227;          /* 古金，对深底 6.81:1（旧绿 6.62:1） */
+  --accent-strong: #e0bf55;   /* 9.22:1 */
+  --accent-soft: rgba(201, 162, 39, 0.16);
+  --accent-contrast: #231a06; /* 金底上 7.1:1 */
+  --focus: #e0bf55;
+  --warning: #f0913f;
+  --warning-soft: rgba(240, 145, 63, 0.15);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-scheme="system"] {
+    --accent: #c9a227;
+    --accent-strong: #e0bf55;
+    --accent-soft: rgba(201, 162, 39, 0.16);
+    --accent-contrast: #231a06;
+    --focus: #e0bf55;
+    --warning: #f0913f;
+    --warning-soft: rgba(240, 145, 63, 0.15);
+  }
+}
+/* ============================================================
+   ZHULONG-NEUTRAL — 中性色去绿
+   原中性色带绿调（色相 90-200），是上一个名字的遗留。这里把它们
+   转到暖石色（色相 32），保持 HSL 的 S 与 L 不变，所以每个 token
+   的 WCAG 相对亮度变化都小于 0.02 — 对比度不受影响。
+   由 其他脚本/neutral-zhulong.ps1 生成，该脚本自带亮度断言。
+   整块删掉即可完整回退。
+   ============================================================ */
+
+:root {
+  --canvas: #f4f3f1;
+  --surface-raised: #efece9;
+  --surface-subtle: #f9f8f7;
+  --row-hover: #f7f5f2;
+  --line: #dfdbd6;
+  --line-strong: #c5beb7;
+  --ink: #181511;
+  --ink-soft: #433c34;
+  --muted: #6b635a;
+  --console-muted: #cbc4bd;
+  --console-line: #3b3228;
+}
+
+:root[data-scheme="dark"] {
+  --canvas: #15110d;
+  --surface: #1d1914;
+  --surface-raised: #27221c;
+  --surface-subtle: #211d18;
+  --surface-nav: #231e18;
+  --row-hover: #26211b;
+  --line: #332d27;
+  --line-strong: #4a433a;
+  --toast-base: #211c16;
+  --ink: #f4f1ee;
+  --ink-soft: #dbd4cd;
+  --muted: #a39a8f;
+  --console-muted: #b2a99f;
+  --console-line: #302922;
+}
+
+/* ============================================================
+   ZHULONG-LIQUID-REASSERT — 恢复液态材质映射
+   必须排在 ZHULONG-NEUTRAL 之后：两者特异性相同，靠顺序决定胜负。
+   删除 ZHULONG-NEUTRAL 时这一段也要一起删。
+   ============================================================ */
+
+:root[data-surface="liquid"] {
+  --canvas: var(--liquid-canvas);
+  --surface: var(--liquid-surface);
+  --surface-raised: var(--liquid-surface-raised);
+  --surface-subtle: var(--liquid-surface-subtle);
+  /* 注意：这两条不遵循 --x -> var(--liquid-x) 的规律，
+     真实令牌名是 --liquid-nav 与 --liquid-toast。照规律写会指向不存在的变量，
+     结果是液态主题下导航壳与吐司背景解析失败——吐司会因此失去玻璃质感。 */
+  --surface-nav: var(--liquid-nav);
+  --row-hover: var(--liquid-row-hover);
+  --line: var(--liquid-line);
+  --line-strong: var(--liquid-line-strong);
+  --control-line: var(--liquid-control-line);
+  --control-line-strong: var(--liquid-control-line-strong);
+  --control-selected: var(--liquid-control-selected);
+  --control-selected-line: var(--liquid-control-selected-line);
+  --hairline: var(--liquid-hairline);
+  --toast-base: var(--liquid-toast);
+  --nav-shell: var(--liquid-nav-shell);
+  --specular: var(--liquid-specular);
+  --photo-veil: var(--liquid-photo-veil);
+}
+
+/* ============================================================
+   ZHULONG-DEGREEN-REST — 清掉剩余绿色
+   前面三块处理了 accent/warning 与中性色，这一块处理剩下的语义色与装饰色。
+   必须排在 ZHULONG-LIQUID-REASSERT 之后（同特异性靠顺序）。
+   --success 由绿改金：与 accent 同色系但更亮，靠明度区分而非色相
+   （深色下 success 对底 11.2:1，accent 6.8:1，同屏时一个是亮金文字、一个是暗金填充）。
+   danger 保持红色，所以「成功/失败」仍然能靠色相分辨。
+   --orb-b/--orb-c 是蓝与紫，属于有意的多色氛围层，只把绿色那一支换掉。
+   ============================================================ */
+
+:root {
+  --success: #8a6a12;
+  --success-soft: #f6efdc;
+  --hero-title-success: #f7e9c2;
+  --console: #1b1710;
+  --console-glow: rgba(122, 90, 30, 0.2);
+  --orb-a: rgba(201, 162, 39, 0.3);
+  --liquid-backdrop:
+    radial-gradient(ellipse 120% 90% at 22% 8%, #d5e6fa 0%, transparent 62%),
+    radial-gradient(ellipse 110% 80% at 84% 4%, #f0e6cd 0%, transparent 58%),
+    radial-gradient(ellipse 140% 110% at 50% 108%, #e4dcf8 0%, transparent 70%);
+}
+
+:root[data-scheme="dark"] {
+  --success: #dcc46a;
+  --success-soft: rgba(220, 196, 106, 0.14);
+  --hero-title-success: #f2e3b4;
+  --console: #14110a;
+  --console-glow: rgba(220, 196, 106, 0.2);
+  --orb-a: rgba(224, 191, 85, 0.4);
+  --liquid-backdrop:
+    radial-gradient(ellipse 120% 90% at 22% 8%, #16283a 0%, transparent 62%),
+    radial-gradient(ellipse 110% 80% at 84% 4%, #3a3320 0%, transparent 58%),
+    radial-gradient(ellipse 140% 110% at 50% 108%, #2a2440 0%, transparent 70%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-scheme="system"] {
+    --success: #dcc46a;
+    --success-soft: rgba(220, 196, 106, 0.14);
+    --hero-title-success: #f2e3b4;
+    --console: #14110a;
+    --console-glow: rgba(220, 196, 106, 0.2);
+    --orb-a: rgba(224, 191, 85, 0.4);
+    --liquid-backdrop:
+      radial-gradient(ellipse 120% 90% at 22% 8%, #16283a 0%, transparent 62%),
+      radial-gradient(ellipse 110% 80% at 84% 4%, #3a3320 0%, transparent 58%),
+      radial-gradient(ellipse 140% 110% at 50% 108%, #2a2440 0%, transparent 70%);
+  }
+}
+/* ============================================================
+   ZHULONG-DEGREEN-SOURCES — 最后五个源令牌
+   前面几块改的是映射层与语义色；这五个是 --liquid-* / --hero-* 的源值，
+   之前的中性色脚本只重写了映射，没碰源，所以它们还带着绿。
+   是靠「遍历所有可见元素的 computed 颜色」扫出来的——
+   只看令牌名会漏掉它们，因为它们是被 var() 间接引用的。
+   色相一律转到暖石/金系，透明度与明度保持不变。
+   ============================================================ */
+
+:root {
+  --hero-ink: #faf9f7;
+  --hero-title-success: #f7ecc8;
+  --liquid-control-line: rgba(74, 66, 47, 0.26);
+  --liquid-control-line-strong: rgba(74, 66, 47, 0.42);
+  --liquid-control-selected-line: rgba(122, 90, 30, 0.42);
 }

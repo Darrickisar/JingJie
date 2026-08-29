@@ -98,8 +98,11 @@ diagnostics_private_dns() {
     printf 'unknown\n'
     return 0
   }
+  # settings get 对不存在的键会打印字面量 null，不是空串。漏掉 null 的话，
+  # 从没动过「私人 DNS」的设备会被判成 active，环境检查就报一条假警告。
+  # doh_manager.sh 的 doh_private_dns_check 一直是把 null 当关闭的，这里跟它保持一致。
   case "$mode" in
-    ''|off|opportunistic) printf 'off\n' ;;
+    ''|null|off|opportunistic) printf 'off\n' ;;
     *) printf 'active\n' ;;
   esac
 }

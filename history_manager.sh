@@ -11,6 +11,23 @@ export MODDIR BB
 HISTORY_TRACE_MAX_DOMAINS_DEFAULT=500000
 HISTORY_TRACE_MAX_BYTES=33554432
 HISTORY_TRACE_RETAIN=4
+# 拦截记录的有效期：3 小时。超过就删，不再保留。
+# 读取进程在 flush_batch 里做权威删除（有流量才走到，不新增任何定时唤醒），
+# 这里是 shell 侧的同一条线：查询时按同一个截止时刻过滤，并顺手删掉整代过期的文件，
+# 这样「界面看到的条数」和「文件里留着的行」永远说的是同一件事。
+HISTORY_RETENTION_SECONDS=10800
+
+# 保留期的起点。取不到时间就回 0（等于不过滤），宁可多显示也不要把记录全筛没了。
+history_retention_cutoff() {
+  local now
+  now=$(date +%s 2>/dev/null) || { printf '0\n'; return 0; }
+  case "$now" in ''|*[!0-9]*) printf '0\n'; return 0 ;; esac
+  if [ "$now" -gt "$HISTORY_RETENTION_SECONDS" ]; then
+    printf '%s\n' "$((now - HISTORY_RETENTION_SECONDS))"
+  else
+    printf '0\n'
+  fi
+}
 
 history_config_file() { printf '%s\n' "$CONFIG_DIR/history.conf"; }
 history_root() { printf '%s\n' "$RULE_RUNTIME/history"; }
@@ -300,7 +317,15 @@ history_hosts_extract_domains() {
 history_map_build() {
   local domains=$1 map=$2 sorted
   sorted="$map.sorted"
-  LC_ALL=C "$BB" sort "$domains" > "$sorted" || return 74
+  # 唯一的调用方（history_prepare_trace）传进来的 domains 已经是 history_hosts_extract_domains
+  # 按 LC_ALL=C 排过、并且按域名去重过的。已经有序时就不必再排一遍：sort -c 只是 O(n) 扫一趟、
+  # 不落临时文件，而对 50 万行重排一遍是开启动作里实打实的一段等待。
+  # 顺序仍然由这里保证——sort -c 说没序就照样排，函数的契约不变。
+  if LC_ALL=C "$BB" sort -c "$domains" 2>/dev/null; then
+    sorted=$domains
+  else
+    LC_ALL=C "$BB" sort "$domains" > "$sorted" || return 74
+  fi
   "$BB" awk '
     {
       ordinal=NR
@@ -310,8 +335,13 @@ history_map_build() {
       fourth=remainder%256
       printf "127.%d.%d.%d\t%s\n", second, third, fourth, $0
     }
-  ' "$sorted" > "$map" || { rm -f "$sorted" "$map"; return 74; }
-  rm -f "$sorted" || return 74
+  ' "$sorted" > "$map" || {
+    [ "$sorted" = "$domains" ] || rm -f "$sorted"
+    rm -f "$map"
+    return 74
+  }
+  # 走了快路径时 sorted 就是入参本身，不能删。
+  [ "$sorted" = "$domains" ] || rm -f "$sorted" || return 74
 }
 
 history_trace_hosts_build() {
@@ -1190,9 +1220,17 @@ history_runtime_state() {
   export HISTORY_RUNTIME_PROCESS HISTORY_RUNTIME_LOGGING HISTORY_RUNTIME_GUARD
 }
 
+# 统计只需要一遍已校验的事件行。拆出来是为了让打包读取复用 history_query_collect
+# 已经收集好的那一份：两边各收集一次等于把两个上限 4 MiB 的事件文件白过一遍。
+history_event_stats_emit() {
+  "$BB" awk -F '\t' '{rows++; count+=$6; dropped+=$7; degraded+=$8} END{printf "%d %d %d %d",rows+0,count+0,dropped+0,degraded+0}' "$1"
+}
+
+# $1 给了就当作「收集时顺手算好的统计」直接用，不再自己走一遍事件文件。
+# 传的是统计结果而不是事件行：收集会按 token 过滤事件行，拿过滤后的行重算会改掉计数含义。
 history_status_json() {
-  local enabled=0 root tmp stats event_rows=0 count=0 dropped=0 degraded=0
-  local state=disabled json_token=null availability=unknown error=null file
+  local collected=${1--} enabled=0 root tmp stats event_rows=0 count=0 dropped=0 degraded=0
+  local state=disabled json_token=null availability=unknown error=null file cutoff
   history_config_bootstrap || return
   enabled=$(history_config_get) || return
   root=$(history_root)
@@ -1203,15 +1241,29 @@ history_status_json() {
   if history_enable_error_validate 2>/dev/null; then
     error="\"$HISTORY_ENABLE_ERROR_CODE\""
   fi
-  tmp="$RULE_TMP/history-status.$$"
-  : > "$tmp" || return 74
-  for file in "$root/events.tsv.1" "$root/events.tsv"; do
-    [ -e "$file" ] || [ -L "$file" ] || continue
-    [ -f "$file" ] && [ ! -L "$file" ] || { rm -f "$tmp"; return 70; }
-    history_event_file_append_valid "$file" "$tmp" || { rm -f "$tmp"; return 74; }
-  done
-  stats=$("$BB" awk -F '\t' '{rows++; count+=$6; dropped+=$7; degraded+=$8} END{printf "%d %d %d %d",rows+0,count+0,dropped+0,degraded+0}' "$tmp") || { rm -f "$tmp"; return 74; }
-  rm -f "$tmp"
+  if [ "$collected" != - ]; then
+    [ -f "$collected" ] && [ ! -L "$collected" ] || return 70
+    stats=$(cat "$collected") || return 74
+    # 四个十进制数，别的一律不认——统计文件坏了要报错，不能悄悄当 0 显示。
+    case "$stats" in
+      *[!0-9\ ]*|'') return 74 ;;
+    esac
+    [ "$(printf '%s\n' "$stats" | "$BB" awk '{print NF}')" = 4 ] || return 74
+  else
+    tmp="$RULE_TMP/history-status.$$"
+    : > "$tmp" || return 74
+    # 和 history_query_collect 用同一个截止时刻。少了这个 cutoff，单独读状态会把已经
+    # 过期的行也算进拦截次数，而打包读取复用的是收集时按 cutoff 算好的统计——同一个界面
+    # 会因为走哪条路而显示两个不同的数字，标题里的条数还会指向列表里根本没有的记录。
+    cutoff=$(history_retention_cutoff)
+    for file in "$root/events.tsv.1" "$root/events.tsv"; do
+      [ -e "$file" ] || [ -L "$file" ] || continue
+      [ -f "$file" ] && [ ! -L "$file" ] || { rm -f "$tmp"; return 70; }
+      history_event_file_append_valid "$file" "$tmp" "$cutoff" || { rm -f "$tmp"; return 74; }
+    done
+    stats=$(history_event_stats_emit "$tmp") || { rm -f "$tmp"; return 74; }
+    rm -f "$tmp"
+  fi
   set -- $stats
   event_rows=$1; count=$2; dropped=$3; degraded=$4
 
@@ -1242,6 +1294,42 @@ history_status_json() {
     "$([ "$HISTORY_RUNTIME_LOGGING" = 1 ] && printf true || printf false)" \
     "$([ "$HISTORY_RUNTIME_GUARD" = 1 ] && printf true || printf false)" "$json_token" \
     "$event_rows" "$count" "$dropped" "$degraded" "$error"
+}
+
+# 事件文件的变化签名：每个文件只 stat 取大小和 mtime。
+# 刻意不做统计——history_status_json 要把两个事件文件（上限各 4 MiB）过一遍 awk，
+# 拿它当轮询源就是按秒烧电。
+history_pulse_signature() {
+  local root file signature= size mtime
+  root=$(history_root)
+  for file in "$root/events.tsv.1" "$root/events.tsv"; do
+    if [ -f "$file" ] && [ ! -L "$file" ]; then
+      size=$("$BB" stat -c %s "$file" 2>/dev/null) || size=0
+      mtime=$("$BB" stat -c %Y "$file" 2>/dev/null) || mtime=0
+      case "$size:$mtime" in *[!0-9:]*) size=0; mtime=0 ;; esac
+    else
+      size=0
+      mtime=0
+    fi
+    signature="$signature$size.$mtime-"
+  done
+  printf '%s\n' "$signature"
+}
+
+# 变化探针：只回答「事件文件动过没有」，供界面在日志页可见时轮询。
+# 签名没变就什么都不用做；变了界面才去做一次真正的读取。
+history_pulse_json() {
+  local enabled logging=false signature
+  history_config_bootstrap || return
+  enabled=$(history_config_get) || return
+  signature=$(history_pulse_signature) || return
+  # 读取进程是否在跑决定界面还要不要继续轮询：停了就没有新事件可等。
+  if [ "$enabled" = 1 ]; then
+    history_runtime_state 2>/dev/null || true
+    [ "${HISTORY_RUNTIME_LOGGING-0}" = 1 ] && logging=true || logging=false
+  fi
+  printf '{"enabled":%s,"logging":%s,"signature":"%s"}\n' \
+    "$([ "$enabled" = 1 ] && printf true || printf false)" "$logging" "$signature"
 }
 
 history_packages_json_from_normalized() {
@@ -1298,9 +1386,11 @@ history_packages_normalize() {
   atomic_replace_file "$output.sorted" "$output" || { rm -f "$output" "$output.sorted"; return 74; }
 }
 
+# 事件行的唯一入口：格式校验 + 保留期过滤。两件事放在同一遍 awk 里，
+# 免得为了过期过滤再把 4 MiB 过一趟。
 history_event_file_append_valid() {
-  local file=$1 output=$2
-  "$BB" awk -F '\t' '
+  local file=$1 output=$2 cutoff=${3:-0}
+  "$BB" awk -F '\t' -v cutoff="$cutoff" '
     function uint(v,max,min){return v~/^[0-9]+$/ && length(v)<=16 && v+0>=min && v+0<=max}
     function token_valid(v){return length(v)==16 && v~/^[0-9a-f]+$/}
     function octet(v){return v~/^[0-9]+$/ && v+0<=255 && (v=="0" || v!~/^0/)}
@@ -1308,21 +1398,78 @@ history_event_file_append_valid() {
       n=split(v,a,".")
       return n==4 && a[1]==127 && octet(a[2]) && a[2]+0>=64 && a[2]+0<=71 && octet(a[3]) && octet(a[4])
     }
-    NF==8 && uint($1,9007199254740991,0) && token_valid($2) && address_valid($3) &&
+    NF==8 && uint($1,9007199254740991,0) && $1+0>=cutoff && token_valid($2) && address_valid($3) &&
       uint($4,4294967294,0) && uint($5,65535,1) && uint($6,4294967295,1) &&
       uint($7,4294967295,0) && uint($8,4294967295,0) {print}
   ' "$file" >> "$output"
 }
 
+# 映射校验结果的缓存键：映射与清单各自的 inode、大小、mtime。
+# 这两份文件都是发布时一次写成、之后只读（换 token 会换路径），所以三元组没变
+# 就是同一份字节，不需要为每次查询把 500k 行的映射重新 sha256 一遍。
+# 映射一侧的重活（整文件 sha256 + wc + 逐行结构校验）按 500k 行计，而界面每读一次记录
+# （轮询命中、换筛选条件、翻页）都要为每个保留世代做一遍。映射建好之后就不再改，
+# 所以用 inode.大小.mtime 做键把「已经完整校验过」这件事记下来。
+#
+# 这个键的分辨率是秒（stat %Y 没有可移植的纳秒字段）。也就是说：同 inode、同大小、
+# 且在同一秒内的原地改写不会被这一层看出来。这不降低整体门槛——那种改写需要 root 对
+# 运行目录的写权限，而缓存文件本身就在同一棵 root-only 目录里，能那样改映射的人同样能直接
+# 伪造缓存。原子替换会换 inode，正常重建又会换清单里的哈希（哈希也在键里），都必然不命中。
+history_query_map_stamp() {
+  local map=$1 manifest=$2 stamp
+  stamp=$("$BB" stat -c '%i.%s.%Y' "$map" "$manifest" 2>/dev/null | "$BB" tr '\n' '-') || return 1
+  case "$stamp" in ''|*[!0-9.-]*) return 1 ;; esac
+  # 两个文件各一行，缺一行说明 stat 没全拿到，宁可当未命中去做全量校验。
+  [ "$("$BB" printf '%s' "$stamp" | "$BB" tr -cd '-' | "$BB" wc -c | "$BB" tr -d ' ')" = 2 ] || return 1
+  printf '%s\n' "$stamp"
+}
+
+# 放在 history 根里，卸载时的 rm -rf "$RULE_RUNTIME/history" 就顺带清掉了，
+# 不用再往 history_cleanup_uninstall_locked 里加一条单独的删除。
+history_query_map_cache_file() {
+  printf '%s\n' "$(history_root)/map-verified.tsv"
+}
+
+# 缓存命中：同 token 同三元组已经完整校验过。缓存文件本身坏了一律当未命中。
+history_query_map_cache_hit() {
+  local token=$1 stamp=$2 cache
+  cache=$(history_query_map_cache_file)
+  [ -f "$cache" ] && [ ! -L "$cache" ] || return 1
+  "$BB" awk -F '\t' -v token="$token" -v stamp="$stamp" '
+    NF==3 && $1=="1" && $2==token && $3==stamp {found=1; exit}
+    END{exit found?0:1}
+  ' "$cache"
+}
+
+history_query_map_cache_store() {
+  local token=$1 stamp=$2 cache tmp
+  cache=$(history_query_map_cache_file)
+  tmp="$cache.$$"
+  # 只留当前 token 的一行：换 token 后旧行没有用处，留着只会让缓存无界增长。
+  printf '1\t%s\t%s\n' "$token" "$stamp" > "$tmp" || { rm -f "$tmp"; return 0; }
+  atomic_replace_file "$tmp" "$cache" 2>/dev/null || rm -f "$tmp"
+  return 0
+}
+
 history_query_map_validate() {
-  local token=$1 map=$2 manifest=$3 manifest_token expected actual count expected_count
+  local token=$1 map=$2 manifest=$3 manifest_token expected actual count expected_count stamp
   history_token_valid "$token" || return 65
   [ -f "$map" ] && [ ! -L "$map" ] || return 70
   [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 70
+  # 清单一侧的校验每次都做：它只有十几行，代价可以忽略，而它是 token 与哈希的来源。
+  # 缓存只跳过映射一侧的重活（整文件 sha256 + wc + 逐行结构校验），
+  # 那才是每次查询里按 500k 行计的部分。
   history_trace_manifest_validate "$manifest" "$token" >/dev/null 2>&1 || return 70
   manifest_token=$(history_manifest_get_unique "$manifest" map_token) || return 70
   [ "$manifest_token" = "$token" ] || return 70
   expected=$(history_manifest_get_unique "$manifest" map_sha256) || return 70
+  if stamp=$(history_query_map_stamp "$map" "$manifest"); then
+    # 缓存键里带上清单里记的哈希：清单被换过（哈希变了）就一定不命中。
+    stamp="$stamp$expected"
+    history_query_map_cache_hit "$token" "$stamp" && return 0
+  else
+    stamp=
+  fi
   actual=$(sha256_file "$map") || return 70
   [ "$actual" = "$expected" ] || return 70
   expected_count=$(history_manifest_get_unique "$manifest" rule_count) || return 70
@@ -1342,11 +1489,13 @@ history_query_map_validate() {
     }
     NF!=2 || !valid_address($1) || !valid_domain($2) || addresses[$1]++ || domains[$2]++ {exit 1}
   ' "$map" || return 70
+  [ -z "$stamp" ] || history_query_map_cache_store "$token" "$stamp"
 }
 
 history_query_collect() {
-  local output=$1 root file token tokens token_map manifest valid_tokens
+  local output=$1 root file token tokens token_map manifest valid_tokens cutoff mtime
   root=$(history_root)
+  cutoff=$(history_retention_cutoff)
   tokens="$output.tokens"
   valid_tokens="$output.valid-tokens"
   : > "$output" || return 74
@@ -1356,7 +1505,18 @@ history_query_collect() {
   for file in "$root/events.tsv.1" "$root/events.tsv"; do
     [ -e "$file" ] || [ -L "$file" ] || continue
     [ -f "$file" ] && [ ! -L "$file" ] || { rm -f "$output" "$tokens"; return 70; }
-    history_event_file_append_valid "$file" "$output" || { rm -f "$output" "$tokens" "$output.maps"; return 74; }
+    # 整代过期就直接删掉：行是按时间追加的，mtime 就是这一代里最新一行的时刻，
+    # 比它更早的行不可能存在。读取进程停着时（关掉记录之后）也只有这条路径会来清，
+    # 所以「超时不保留」不依赖读取进程还活着。
+    if [ "$cutoff" -gt 0 ]; then
+      mtime=$("$BB" stat -c %Y "$file" 2>/dev/null) || mtime=
+      case "$mtime" in ''|*[!0-9]*) mtime= ;; esac
+      if [ -n "$mtime" ] && [ "$mtime" -lt "$cutoff" ]; then
+        rm -f "$file"
+        continue
+      fi
+    fi
+    history_event_file_append_valid "$file" "$output" "$cutoff" || { rm -f "$output" "$tokens" "$output.maps"; return 74; }
   done
   "$BB" awk -F '\t' '{print $2}' "$output" > "$tokens" || { rm -f "$output" "$tokens" "$output.maps"; return 74; }
   LC_ALL=C "$BB" sort -u "$tokens" > "$tokens.sorted" || { rm -f "$output" "$tokens" "$tokens.sorted"; return 74; }
@@ -1368,10 +1528,13 @@ history_query_collect() {
        [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
       continue
     fi
-    if ! history_query_map_validate "$token" "$token_map" "$manifest"; then
+    # 映射或清单还在、但校验不过，说明内容被改过：这是完整性失败，必须整次查询失败，
+    # 不能只丢这个 token 的行悄悄往下走——那样篡改就被一屏「记录少了几条」盖过去了。
+    # 「世代被裁剪、映射整个没了」是另一回事，上面那个分支已经放过去了。
+    history_query_map_validate "$token" "$token_map" "$manifest" || {
       rm -f "$output" "$tokens" "$tokens.sorted" "$valid_tokens" "$output.maps"
       return 70
-    fi
+    }
     printf '%s\n' "$token" >> "$valid_tokens" || {
       rm -f "$output" "$tokens" "$tokens.sorted" "$valid_tokens" "$output.maps"
       return 74
@@ -1381,6 +1544,15 @@ history_query_collect() {
       return 74
     }
   done < "$tokens.sorted"
+  # 统计要在按 token 过滤之前取。过滤会把「映射已被裁剪掉」的事件行丢掉——列表和应用
+  # 清单本来就解析不出域名，丢掉是对的；但拦截次数是累计量，之前一直把这些行算在内。
+  # 拿过滤后的行去统计会让日志页显示的次数比别处少，那是白改了用户看得见的数字。
+  if [ "${HISTORY_COLLECT_STATS-0}" = 1 ]; then
+    history_event_stats_emit "$output" > "$output.stats" || {
+      rm -f "$output" "$tokens" "$tokens.sorted" "$valid_tokens" "$output.maps" "$output.stats"
+      return 74
+    }
+  fi
   "$BB" awk -F '\t' 'NR==FNR{valid[$1]=1;next} valid[$2]' "$valid_tokens" "$output" > "$output.filtered" || {
     rm -f "$output" "$tokens" "$tokens.sorted" "$valid_tokens" "$output.maps" "$output.filtered"
     return 74
@@ -1392,32 +1564,40 @@ history_query_collect() {
   rm -f "$tokens" "$tokens.sorted" "$valid_tokens"
 }
 
-history_query_json() {
-  local cursor=$1 limit=$2 since=$3 uid=$4 port=$5 domain_b64=$6 tmp filter canonical decoded_bytes line epoch domain ev_uid ev_port count dropped degraded emitted=0 has_more=false next result=0
-  [ "$#" -eq 6 ] || return 64
+# 查询参数校验与域名过滤串解码。解出来的过滤串放在 HISTORY_QUERY_FILTER，
+# 让单独查询和打包查询共用同一套校验，不用各写一遍。
+history_query_prepare() {
+  local tmp=$1 cursor=$2 limit=$3 since=$4 uid=$5 port=$6 domain_b64=$7 canonical decoded_bytes
+  HISTORY_QUERY_FILTER=
   history_uint_valid "$cursor" 50000 0 || return 65
   history_uint_valid "$limit" 200 1 || return 65
   history_uint_valid "$since" 9223372036854775807 0 || return 65
   [ "$uid" = - ] || history_uint_valid "$uid" 4294967294 0 || return 65
   [ "$port" = - ] || history_uint_valid "$port" 65535 1 || return 65
-  tmp="$RULE_TMP/history-query.$$"
-  rm -f "$tmp" "$tmp".*
-  if [ "$domain_b64" != - ]; then
-    case "$domain_b64" in ''|*[!A-Za-z0-9+/=]*) return 65 ;; esac
-    [ "${#domain_b64}" -le 340 ] || return 65
-    [ $(( ${#domain_b64} % 4 )) -eq 0 ] || return 65
-    printf '%s' "$domain_b64" | "$BB" base64 -d > "$tmp.domain" 2>/dev/null || { rm -f "$tmp.domain"; return 65; }
-    canonical=$("$BB" base64 "$tmp.domain" | "$BB" tr -d '\n') || { rm -f "$tmp.domain"; return 65; }
-    [ "$canonical" = "$domain_b64" ] || { rm -f "$tmp.domain"; return 65; }
-    decoded_bytes=$(wc -c < "$tmp.domain" | "$BB" tr -d ' ') || { rm -f "$tmp.domain"; return 65; }
-    [ "$decoded_bytes" -le 253 ] || { rm -f "$tmp.domain"; return 65; }
-    filter=$(cat "$tmp.domain")
-    rm -f "$tmp.domain"
-    [ "${#filter}" -eq "$decoded_bytes" ] || return 65
-    history_domain_filter_valid "$filter" || return 65
-  fi
-  history_query_collect "$tmp" || return
-  "$BB" awk -F '\t' -v maps="$tmp.maps" -v since="$since" -v wanted_uid="$uid" -v wanted_port="$port" -v filter="${filter-}" '
+  [ "$domain_b64" != - ] || return 0
+  case "$domain_b64" in ''|*[!A-Za-z0-9+/=]*) return 65 ;; esac
+  [ "${#domain_b64}" -le 340 ] || return 65
+  [ $(( ${#domain_b64} % 4 )) -eq 0 ] || return 65
+  printf '%s' "$domain_b64" | "$BB" base64 -d > "$tmp.domain" 2>/dev/null || { rm -f "$tmp.domain"; return 65; }
+  canonical=$("$BB" base64 "$tmp.domain" | "$BB" tr -d '\n') || { rm -f "$tmp.domain"; return 65; }
+  [ "$canonical" = "$domain_b64" ] || { rm -f "$tmp.domain"; return 65; }
+  decoded_bytes=$(wc -c < "$tmp.domain" | "$BB" tr -d ' ') || { rm -f "$tmp.domain"; return 65; }
+  [ "$decoded_bytes" -le 253 ] || { rm -f "$tmp.domain"; return 65; }
+  HISTORY_QUERY_FILTER=$(cat "$tmp.domain")
+  rm -f "$tmp.domain"
+  [ "${#HISTORY_QUERY_FILTER}" -eq "$decoded_bytes" ] || return 65
+  history_domain_filter_valid "$HISTORY_QUERY_FILTER" || return 65
+}
+
+# 从已经收集好的 $tmp（事件）、$tmp.maps（域名映射）、$tmp.packages（包名）出一页 JSON。
+# 不再自己收集，交给调用方决定收集几次——打包读取就靠这个只收集一次。
+# $8 给了就把它当事件签名一起写进这一页 JSON（打包读取传 - ，因为它在顶层已经带了一份）。
+# 单独查询也要带签名：界面用它当轮询基线，缺了的话「改筛选条件」那条路径读完之后基线仍是旧的，
+# 下一轮探针必然比出不同，于是白做一次整包读取。
+history_query_emit() {
+  local tmp=$1 cursor=$2 limit=$3 since=$4 uid=$5 port=$6 filter=$7 signature=${8--}
+  local line epoch domain ev_uid ev_port token count dropped degraded emitted=0 has_more=false next result=0 total
+  "$BB" awk -F '\t' -v maps="$tmp.maps" -v since="$since" -v wanted_uid="$uid" -v wanted_port="$port" -v filter="$filter" '
     BEGIN {
       while((getline < maps)>0) domains[$1 SUBSEP $2]=$3
       close(maps)
@@ -1434,9 +1614,13 @@ history_query_json() {
       for(key in count) printf "%019d\t%.0f\t%s\t%s\t%s\t%s\t%.0f\t%.0f\t%.0f\n", epoch[key], epoch[key], resolved[key], uid[key], port[key], token[key], count[key], dropped[key], degraded[key]
     }
   ' "$tmp" | LC_ALL=C "$BB" sort -t "$(printf '\t')" -k1,1nr -k2,2 -k3,3n -k4,4n > "$tmp.sorted" || result=74
-  [ "$result" -eq 0 ] || { rm -f "$tmp" "$tmp".*; return "$result"; }
-  history_packages_normalize "$tmp.packages" || { result=$?; rm -f "$tmp" "$tmp".*; return "$result"; }
-  printf '{"cursor":%s,"items":[' "$cursor"
+  [ "$result" -eq 0 ] || return "$result"
+  # 聚合后的总条数。分页要显示「第几页 / 共几页」，靠 hasMore 只能知道「还有」，
+  # 数不出总数；这里已经有排好序的整份结果，多一个 wc -l 就够，不必再过一遍事件文件。
+  total=$("$BB" wc -l < "$tmp.sorted" | "$BB" tr -d ' ') || result=74
+  case "$total" in ''|*[!0-9]*) total=0 ;; esac
+  [ "$result" -eq 0 ] || return "$result"
+  printf '{"cursor":%s,"total":%s,"items":[' "$cursor" "$total"
   "$BB" tail -n "+$((cursor + 1))" "$tmp.sorted" > "$tmp.page" || result=74
   while IFS=$(printf '\t') read -r line epoch domain ev_uid ev_port token count dropped degraded; do
     if [ "$emitted" -ge "$limit" ]; then has_more=true; break; fi
@@ -1445,23 +1629,34 @@ history_query_json() {
       "$epoch" "$(printf '%s' "$domain" | json_escape)" "$ev_uid" "$(history_packages_json_from_normalized "$ev_uid" "$tmp.packages")" "$ev_port" "$count" "$dropped" "$degraded"
     emitted=$((emitted + 1))
   done < "$tmp.page"
-  rm -f "$tmp" "$tmp".*
   next=$((cursor + emitted))
-  printf '],"nextCursor":%s,"hasMore":%s}\n' "$next" "$has_more"
+  printf '],"nextCursor":%s,"hasMore":%s' "$next" "$has_more"
+  [ "$signature" = - ] || printf ',"signature":"%s"' "$signature"
+  printf '}\n'
   return "$result"
 }
 
-history_apps_json() {
-  local tmp uid event_count first=1 emitted=0 result=0
-  tmp="$RULE_TMP/history-apps.$$"
+history_query_json() {
+  local cursor=$1 limit=$2 since=$3 uid=$4 port=$5 domain_b64=$6 tmp signature result=0
+  [ "$#" -eq 6 ] || return 64
+  tmp="$RULE_TMP/history-query.$$"
   rm -f "$tmp" "$tmp".*
+  history_query_prepare "$tmp" "$cursor" "$limit" "$since" "$uid" "$port" "$domain_b64" || return
+  # 与打包读取同理：签名取在读事件文件之前，宁可多读一次也不要漏掉收集期间新到的事件。
+  signature=$(history_pulse_signature) || return 74
   history_query_collect "$tmp" || return
-  "$BB" awk -F '\t' '{count[$4]+=$6} END{for(uid in count)printf "%s\t%.0f\n",uid,count[uid]}' "$tmp" | \
-    LC_ALL=C "$BB" sort -t "$(printf '\t')" -k1,1n | "$BB" head -n 1000 > "$tmp.apps" || {
-      rm -f "$tmp" "$tmp".*
-      return 74
-    }
   history_packages_normalize "$tmp.packages" || { result=$?; rm -f "$tmp" "$tmp".*; return "$result"; }
+  history_query_emit "$tmp" "$cursor" "$limit" "$since" "$uid" "$port" "${HISTORY_QUERY_FILTER-}" "$signature"
+  result=$?
+  rm -f "$tmp" "$tmp".*
+  return "$result"
+}
+
+# 同样只出 JSON，收集与包名归一化由调用方负责。
+history_apps_emit() {
+  local tmp=$1 uid event_count first=1 result=0
+  "$BB" awk -F '\t' '{count[$4]+=$6} END{for(uid in count)printf "%s\t%.0f\n",uid,count[uid]}' "$tmp" | \
+    LC_ALL=C "$BB" sort -t "$(printf '\t')" -k1,1n | "$BB" head -n 1000 > "$tmp.apps" || return 74
   printf '{"apps":['
   while IFS=$(printf '\t') read -r uid event_count; do
     history_uint_valid "$uid" 4294967294 0 || continue
@@ -1469,10 +1664,54 @@ history_apps_json() {
     [ "$first" = 1 ] || printf ','
     first=0
     printf '{"uid":%s,"packages":%s,"eventCount":%s}' "$uid" "$(history_packages_json_from_normalized "$uid" "$tmp.packages")" "$event_count"
-    emitted=$((emitted + 1))
   done < "$tmp.apps"
-  rm -f "$tmp" "$tmp".*
   printf ']}\n'
+  return "$result"
+}
+
+history_apps_json() {
+  local tmp result=0
+  tmp="$RULE_TMP/history-apps.$$"
+  rm -f "$tmp" "$tmp".*
+  history_query_collect "$tmp" || return
+  history_packages_normalize "$tmp.packages" || { result=$?; rm -f "$tmp" "$tmp".*; return "$result"; }
+  history_apps_emit "$tmp"
+  result=$?
+  rm -f "$tmp" "$tmp".*
+  return "$result"
+}
+
+# 进入日志页要的三份数据（状态、应用清单、一页记录）合并成一次调用。
+# 拆开读时 history_query_collect 要走两遍事件文件与映射校验，
+# packages.list（上限 8 MiB）也要归一化两遍，还多两次 shell 启动。
+# 这里收集一次、归一化一次，三份数据一起出。
+history_bundle_json() {
+  # 先取 ${6-} 再验个数：直接写 $6 会在 set -u 下于个数检查之前就报错退出。
+  local cursor=${1-} limit=${2-} since=${3-} uid=${4-} port=${5-} domain_b64=${6-} tmp status apps page signature result=0
+  [ "$#" -eq 6 ] || return 64
+  tmp="$RULE_TMP/history-bundle.$$"
+  rm -f "$tmp" "$tmp".*
+  history_query_prepare "$tmp" "$cursor" "$limit" "$since" "$uid" "$port" "$domain_b64" || return
+  # 签名必须在读事件文件之前取。取在后面的话，收集期间（映射校验 + 两遍 awk，忙时可到秒级）
+  # 新写进来的事件已经在返回的数据里，却又被算进基线，探针永远比不出变化——那正是
+  # 「不动筛选条件就不刷新」的来源。取在前面最多让下一轮多读一次，不会丢事件。
+  signature=$(history_pulse_signature) || return 74
+  # 先收集，再让状态复用收集时算好的统计。反过来写（状态在前）会让 history_status_json
+  # 自己把两个事件文件再过一遍——那正是打包读取要省掉的那一趟。
+  # 赋值前缀加在函数调用上，赋值在函数返回后是否还留着按 POSIX 是未定义的，显式收尾。
+  HISTORY_COLLECT_STATS=1
+  history_query_collect "$tmp" || { result=$?; HISTORY_COLLECT_STATS=0; rm -f "$tmp" "$tmp".*; return "$result"; }
+  HISTORY_COLLECT_STATS=0
+  status=$(history_status_json "$tmp.stats") || { rm -f "$tmp" "$tmp".*; return 70; }
+  history_packages_normalize "$tmp.packages" || { result=$?; rm -f "$tmp" "$tmp".*; return "$result"; }
+  apps=$(history_apps_emit "$tmp") || { result=$?; rm -f "$tmp" "$tmp".*; return "$result"; }
+  # 签名也要带进嵌套的 history 里：界面用同一个解析路径处理「打包读取」和「单独查询」两种
+  # 响应，两边形状必须一样，否则换筛选条件那条路（走单独查询）拿不到基线。
+  page=$(history_query_emit "$tmp" "$cursor" "$limit" "$since" "$uid" "$port" "${HISTORY_QUERY_FILTER-}" "$signature")
+  result=$?
+  rm -f "$tmp" "$tmp".*
+  [ "$result" -eq 0 ] || return "$result"
+  printf '{"status":%s,"apps":%s,"history":%s,"signature":"%s"}\n' "$status" "$apps" "$page" "$signature"
 }
 
 history_main() {
@@ -1489,9 +1728,12 @@ history_main() {
     cleanup-uninstall:1) history_cleanup_uninstall ;;
     clear:1) history_clear ;;
     history-status:1) history_status_json ;;
+    history-pulse:1) history_pulse_json ;;
     history:6) history_query_json "$2" "$3" "$4" "$5" "$6" - ;;
     history:7) history_query_json "$2" "$3" "$4" "$5" "$6" "$7" ;;
     history-apps:1) history_apps_json ;;
+    history-bundle:6) history_bundle_json "$2" "$3" "$4" "$5" "$6" - ;;
+    history-bundle:7) history_bundle_json "$2" "$3" "$4" "$5" "$6" "$7" ;;
     *) return 64 ;;
   esac
 }

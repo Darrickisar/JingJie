@@ -97,6 +97,16 @@ refresh_schedule_write() {
   atomic_replace_file "$tmp" "$file"
 }
 
+# 暂停保护期间自动刷新必须彻底停下来：它每 6/12/24 小时就会把所有来源重新下载一遍
+# 再重建世代，是暂停后最费电、也最容易把刚删掉的缓存重新造回来的一处。
+# 判定方式和 history_active_paused 一致，只读 active.prop，不碰锁。
+refresh_active_paused() {
+  local file="$RULE_RUNTIME/active.prop" mode
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  mode=$("$BB" awk -F= '$1=="active_mode"{print $2}' "$file" 2>/dev/null || true)
+  [ "$mode" = paused ]
+}
+
 refresh_schedule_remove() {
   local directory
   directory=$(refresh_schedule_directory)
@@ -122,7 +132,28 @@ refresh_boot_enabled() {
     refresh_schedule_remove || return
     return 1
   fi
+  # 暂停期间开机不起 crond，也不留调度文件；恢复保护时才装回去。
+  # 用户的 auto_refresh_enabled 偏好一个字都不动。
+  if refresh_active_paused; then
+    refresh_schedule_remove || return
+    return 1
+  fi
   refresh_schedule_write "$AUTO_REFRESH_INTERVAL_HOURS"
+}
+
+# 暂停流程调用：撤掉调度并停掉 crond，但保留用户的开关和间隔偏好。
+refresh_suspend() {
+  local result=0
+  refresh_schedule_remove || result=$?
+  "$SYSTEM_SH" "$MODDIR/process_manager.sh" stop crond >/dev/null 2>&1 || true
+  [ "$result" -eq 0 ] || return "$result"
+}
+
+# 恢复流程调用：按用户偏好把调度和 crond 装回去；本来就关着的话什么都不做。
+refresh_resume() {
+  refresh_config_load || return
+  [ "$AUTO_REFRESH_ENABLED" = 1 ] || return 0
+  refresh_restore_enabled_state "$AUTO_REFRESH_INTERVAL_HOURS"
 }
 
 refresh_restore_enabled_state() {
@@ -162,8 +193,17 @@ refresh_configure() {
   fi
 
   if [ "$previous_enabled" = 1 ] && [ "$previous_hours" = "$hours" ]; then
-    refresh_schedule_write "$hours"
-    return
+    refresh_schedule_write "$hours" || return
+    # 档位没变也要确认 crond 真的还活着。它可能被系统内存回收杀掉，或开机那次没起来；
+    # 此时配置和 crontab 都写着“已开启”，但没有任何东西会触发刷新，
+    # 而用户能做的恰恰就是再点一次保存。start 是幂等的：已在跑会返回 75，
+    # 不会起第二个守护进程；只有确实没在跑时才真的拉起来。
+    set +e
+    "$SYSTEM_SH" "$MODDIR/process_manager.sh" start crond
+    result=$?
+    set -e
+    { [ "$result" -eq 0 ] || [ "$result" -eq 75 ]; } || return "$result"
+    return 0
   fi
 
   if [ "$previous_enabled" = 1 ] && [ "$previous_hours" != "$hours" ]; then
@@ -232,6 +272,12 @@ refresh_tick() {
     log_event info auto_refresh_skipped disabled || true
     return 0
   fi
+  # 纵深防御：调度已经在暂停时撤掉了，这里再挡一层。哪怕有残留的 crontab 被触发，
+  # 也不会联网下载、不会重建世代、不会把缓存造回来。
+  if refresh_active_paused; then
+    log_event info auto_refresh_skipped paused || true
+    return 0
+  fi
   set +e
   operation_submit refresh
   result=$?
@@ -259,6 +305,8 @@ refresh_dispatch() {
     status) [ "$#" -eq 2 ] && [ "$2" = --json ] || return 64; refresh_status_json ;;
     configure) [ "$#" -eq 3 ] || return 64; refresh_configure "$2" "$3" ;;
     boot-enabled) [ "$#" -eq 1 ] || return 64; refresh_boot_enabled ;;
+    suspend) [ "$#" -eq 1 ] || return 64; refresh_suspend ;;
+    resume) [ "$#" -eq 1 ] || return 64; refresh_resume ;;
     tick) [ "$#" -eq 1 ] || return 64; refresh_tick ;;
     cleanup-uninstall) [ "$#" -eq 1 ] || return 64; refresh_cleanup_uninstall ;;
     *) return 64 ;;

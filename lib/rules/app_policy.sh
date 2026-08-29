@@ -400,7 +400,7 @@ app_policy_reconcile_validation_failure() {
 
 app_policy_apply() {
   [ "$#" -eq 3 ] || return 64
-  local mode=$1 uid_b64=$2 ip_b64=$3 state_tmp uid_tmp ip_tmp enabled now result rollback_result=0 current next token pointer pointer_tmp staged=0
+  local mode=$1 uid_b64=$2 ip_b64=$3 state_tmp uid_tmp ip_tmp enabled now result rollback_result=0 current next token pointer pointer_tmp staged=0 firewall_mode
   case "$mode" in off|block_selected|allow_resolved) ;; *) return 65 ;; esac
   rules_lock_acquire app-policy || return
   app_policy_bootstrap_locked || { result=$?; rules_lock_release app-policy; return "$result"; }
@@ -448,7 +448,13 @@ app_policy_apply() {
     rules_lock_release app-policy
     return "$result"
   }
-  "$SYSTEM_SH" "$MODDIR/firewall_manager.sh" app-policy-apply "$mode" "$uid_tmp" "$ip_tmp" "$token" || {
+  # 暂停保护期间用户改分应用策略：快照照实记下用户选的 mode，但内核里一条规则都不装。
+  # staged 路径对 off 是明确的空操作（firewall_manager.sh:1826），也就是用户自己
+  # 关掉分应用时走的同一条路，不是绕过校验。恢复保护时 reconcile 会照快照里的
+  # 真 mode 把规则装回来。
+  firewall_mode=$mode
+  if app_policy_active_paused; then firewall_mode=off; fi
+  "$SYSTEM_SH" "$MODDIR/firewall_manager.sh" app-policy-apply "$firewall_mode" "$uid_tmp" "$ip_tmp" "$token" || {
     result=$?
     "$SYSTEM_SH" "$MODDIR/firewall_manager.sh" app-policy-rollback "$token" >/dev/null 2>&1 || rollback_result=$?
     rm -f "$state_tmp" "$uid_tmp" "$ip_tmp"
@@ -478,6 +484,14 @@ app_policy_apply() {
   rules_lock_release app-policy
 }
 
+# 暂停保护期间不装分应用规则。只读 active.prop，不碰锁。
+app_policy_active_paused() {
+  local file="$RULE_RUNTIME/active.prop" mode
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  mode=$("$BB" awk -F= '$1=="active_mode"{print $2}' "$file" 2>/dev/null || true)
+  [ "$mode" = paused ]
+}
+
 app_policy_reconcile_locked() {
   local state enabled mode uids ips uid_tmp ip_tmp result token revision
   rules_lock_is_held app-policy || return 75
@@ -486,6 +500,13 @@ app_policy_reconcile_locked() {
   revision=$APP_POLICY_CURRENT_REVISION
   token=$(app_policy_revision_token "$revision") || return
   "$SYSTEM_SH" "$MODDIR/firewall_manager.sh" app-policy-recover "$token" || return
+  # 暂停保护期间分应用规则不能留在内核里。recover 必须先跑完：cleanup 是照清单删的，
+  # 清单和现实不一致时只有 recover 能把清单修回来，否则这次清理只是半拉子。
+  # 这里不投影快照——用户的 enabled 偏好要原样留着，恢复时 reconcile 会照它装回来。
+  if app_policy_active_paused; then
+    "$SYSTEM_SH" "$MODDIR/firewall_manager.sh" app-policy-cleanup || return
+    return 0
+  fi
   state=$APP_POLICY_CURRENT_STATE
   enabled=$("$BB" awk -F= '$1=="enabled"{print $2}' "$state") || return
   if [ "$enabled" != 1 ]; then

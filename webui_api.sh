@@ -77,7 +77,7 @@ api_history_args_valid() {
   api_history_domain_arg_valid "$6"
 }
 
-# 按游标分页读取任意日志文件；规则日志与运行日志共用。
+# 按游标分页读取运行日志。
 api_log_file_data() {
   local file=$1 cursor=$2 max=$3 size start text next
   api_uint_valid "$cursor" && api_uint_valid "$max" || return 65
@@ -95,15 +95,11 @@ api_log_file_data() {
   printf '{"cursor":%s,"nextCursor":%s,"text":"%s"}\n' "$cursor" "$next" "$text"
 }
 
-api_logs_data() {
-  api_log_file_data "$RULE_LOG" "$1" "$2"
-}
-
 api_runtime_logs_data() {
   api_log_file_data "$RUNTIME_LOG" "$1" "$2"
 }
 
-# 只清运行日志本体与它的轮转代，不碰规则日志。
+# 只清运行日志本体与它的轮转代。
 api_runtime_logs_clear() {
   rm -f "$RUNTIME_LOG" "$RUNTIME_LOG.1" "$RUNTIME_LOG.2" || return 74
   printf '{"cleared":true}\n'
@@ -118,11 +114,11 @@ RUNTIME_LOG_EXPORT_ROOTS=${RUNTIME_LOG_EXPORT_ROOTS:-"/sdcard/Download /storage/
 api_runtime_logs_export() {
   local root dest name tmp bytes
   [ -f "$RUNTIME_LOG" ] || [ -f "$RUNTIME_LOG.1" ] || [ -f "$RUNTIME_LOG.2" ] || return 66
-  name="jingjie-runtime-log-$(date +%Y%m%d-%H%M%S 2>/dev/null || printf 'export').txt"
+  name="zhulong-runtime-log-$(date +%Y%m%d-%H%M%S 2>/dev/null || printf 'export').txt"
   dest=
   for root in $RUNTIME_LOG_EXPORT_ROOTS; do
     [ -d "$root" ] || continue
-    tmp="$root/.jingjie-write-test.$$"
+    tmp="$root/.zhulong-write-test.$$"
     if : > "$tmp" 2>/dev/null; then
       rm -f "$tmp"
       dest="$root/$name"
@@ -257,9 +253,16 @@ api_background_decode_path() {
   # busybox awk 会把 [\000-\037] 里的 NUL 当成字符串结尾，字符组永远解析失败，
   # 于是任何合法路径都会被判成非法。改用工程里通用的 grep 控制字符检查。
   LC_ALL=C "$BB" grep -q '[[:cntrl:]]' "$tmp" && { rm -f "$tmp"; return 65; }
+  # 换行也是控制字符，但它从不出现在 grep 的行内容里，所以另用行数确认整份内容
+  # 只有一行且不以换行结尾——这一条替代了原先 awk 里的 NR>1，少了它，路径中夹一个
+  # 换行就能通过校验。
+  [ "$("$BB" wc -l < "$tmp" | "$BB" tr -d ' ')" -eq 0 ] || { rm -f "$tmp"; return 65; }
   path=$(cat "$tmp") || { rm -f "$tmp"; return 74; }
   rm -f "$tmp"
-  [ "${#path}" -eq "$bytes" ] || return 65
+  # 必须按字节比。${#path} 在 busybox ash 下数的是字符，于是 /sdcard/图片 这类
+  # 非 ASCII 相册路径会被当成长度不符而拒绝——相册里能看到那个文件夹，点进去却报
+  # 「参数无效」。按字节比同样能挡住 NUL 截断（grep 的字符组匹配不到 NUL）。
+  [ "$(printf '%s' "$path" | "$BB" wc -c | "$BB" tr -d ' ')" -eq "$bytes" ] || return 65
   case "$path" in *../*|*/..|..) return 65 ;; esac
   api_background_path_allowed "$path" || return 65
   printf '%s\n' "$path"
@@ -462,11 +465,6 @@ api_dispatch() {
       data=$(doh_apps_json "$2" "$3" "$4" 2>/dev/null) || { api_error invalid_argument '参数无效'; return 0; }
       api_ok_data "$data"
       ;;
-    logs)
-      [ "$#" -eq 3 ] || { api_error invalid_argument '参数无效'; return 0; }
-      data=$(api_logs_data "$2" "$3" 2>/dev/null) || { api_error invalid_argument '参数无效'; return 0; }
-      api_ok_data "$data"
-      ;;
     runtime-logs)
       [ "$#" -eq 3 ] || { api_error invalid_argument '参数无效'; return 0; }
       data=$(api_runtime_logs_data "$2" "$3" 2>/dev/null) || { api_error invalid_argument '参数无效'; return 0; }
@@ -576,11 +574,6 @@ api_dispatch() {
       data=$(api_background_unstage 2>/dev/null) || { api_error state_invalid '界面偏好不可用'; return 0; }
       api_ok_data "$data"
       ;;
-    log-mode)
-      [ "$#" -eq 1 ] || { api_error invalid_argument '参数无效'; return 0; }
-      data=$(preferences_log_mode_json 2>/dev/null) || { api_error state_invalid 'state invalid'; return 0; }
-      api_ok_data "$data"
-      ;;
     runtime-log-mode)
       [ "$#" -eq 1 ] || { api_error invalid_argument '参数无效'; return 0; }
       data=$(preferences_runtime_log_json 2>/dev/null) || { api_error state_invalid 'state invalid'; return 0; }
@@ -605,6 +598,12 @@ api_dispatch() {
     history-status)
       [ "$#" -eq 1 ] || { api_error invalid_argument '参数无效'; return 0; }
       data=$("$SYSTEM_SH" "$MODDIR/history_manager.sh" history-status 2>/dev/null) || { api_error state_invalid '历史状态不可用'; return 0; }
+      api_ok_data "$data"
+      ;;
+    # 轮询用的廉价探针：只 stat 事件文件，不做任何统计或收集。
+    history-pulse)
+      [ "$#" -eq 1 ] || { api_error invalid_argument '参数无效'; return 0; }
+      data=$("$SYSTEM_SH" "$MODDIR/history_manager.sh" history-pulse 2>/dev/null) || { api_error state_invalid '历史状态不可用'; return 0; }
       api_ok_data "$data"
       ;;
     history)
@@ -643,6 +642,40 @@ api_dispatch() {
       [ "$#" -eq 1 ] || { api_error invalid_argument '参数无效'; return 0; }
       data=$("$SYSTEM_SH" "$MODDIR/history_manager.sh" history-apps 2>/dev/null) || { api_error state_invalid '历史应用不可用'; return 0; }
       api_ok_data "$data"
+      ;;
+    # 进入日志页要的状态、应用清单、第一页记录合并为一次调用：
+    # 少两次 shell 启动，事件收集与 packages.list 归一化各只做一遍。
+    history-bundle)
+      case "$#" in
+        4) set -- "$@" - - - ;;
+        5) set -- "$@" - - ;;
+        6) set -- "$@" - ;;
+        7) ;;
+        *) api_error invalid_argument '参数无效'; return 0 ;;
+      esac
+      history_cursor=$2
+      history_limit=$3
+      history_since=$4
+      history_uid=$5
+      history_port=$6
+      history_domain=$7
+      [ "$history_uid" != none ] || history_uid=-
+      [ "$history_port" != none ] || history_port=-
+      [ "$history_domain" != none ] || history_domain=-
+      api_history_args_valid "$history_cursor" "$history_limit" "$history_since" \
+        "$history_uid" "$history_port" "$history_domain" || {
+        api_error invalid_argument '参数无效'
+        return 0
+      }
+      set +e
+      data=$("$SYSTEM_SH" "$MODDIR/history_manager.sh" history-bundle "$history_cursor" "$history_limit" \
+        "$history_since" "$history_uid" "$history_port" "$history_domain" 2>/dev/null)
+      result=$?
+      set -e
+      case "$result" in
+        0) api_ok_data "$data" ;;
+        *) api_error history_unavailable '拦截历史数据暂不可用' ;;
+      esac
       ;;
     *)
       if ! api_write_verb_known "$verb"; then

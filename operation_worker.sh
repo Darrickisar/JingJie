@@ -63,12 +63,102 @@ worker_effective_mode_paused() {
   [ "$mode" = paused ]
 }
 
+# 每一步都作为独立子进程调用，各自去拿自己那把锁，不在这里嵌套。
+# 锁序（doh -> 短 process/firewall 段，绝不同时持有 process 和 firewall）由
+# 各脚本内部保证，编排层只管顺序。
+worker_exec_refresh_lifecycle() {
+  "$SYSTEM_SH" "$MODDIR/refresh_manager.sh" "$1"
+}
+
+worker_exec_doh_lifecycle() {
+  "$SYSTEM_SH" "$MODDIR/doh_manager.sh" "$1"
+}
+
+worker_exec_app_policy() {
+  "$SYSTEM_SH" "$MODDIR/lib/rules/app_policy.sh" "$1"
+}
+
+# 暂停后把该停的全停：自动刷新的调度和 crond、DoH 代理进程与它的防火墙链、
+# 分应用的内核规则。三步都成功了才去删缓存和世代——删除不可回滚，
+# 中途有东西没停下来就不能动手删。
+#
+# 任一步失败：挂载已经停在 recovery（拦截确实停了），但不执行删除，
+# 结果报 failed 并指明是哪一步。暂停本身幂等，用户重试能接上。
+worker_pause_stop_services() {
+  local result
+  worker_exec_refresh_lifecycle suspend || {
+    result=$?
+    log_event warn pause_refresh_suspend_failed "$result" || true
+    WORKER_RESULT_OVERRIDE=failed
+    WORKER_ERROR_CODE_OVERRIDE=pause_refresh_suspend_failed
+    return "$result"
+  }
+  worker_exec_doh_lifecycle suspend || {
+    result=$?
+    log_event warn pause_doh_suspend_failed "$result" || true
+    WORKER_RESULT_OVERRIDE=failed
+    WORKER_ERROR_CODE_OVERRIDE=pause_doh_suspend_failed
+    return "$result"
+  }
+  worker_exec_app_policy cleanup || {
+    result=$?
+    log_event warn pause_app_policy_cleanup_failed "$result" || true
+    WORKER_RESULT_OVERRIDE=failed
+    WORKER_ERROR_CODE_OVERRIDE=pause_app_policy_cleanup_failed
+    return "$result"
+  }
+}
+
+# 恢复后把停掉的按用户偏好装回去。这几步失败不必回滚到暂停：
+# hosts 拦截已经在跑了，报出来让用户知道哪一样没回来即可。
+worker_resume_start_services() {
+  local result failures=0
+  worker_exec_refresh_lifecycle resume || {
+    result=$?
+    log_event warn resume_refresh_failed "$result" || true
+    failures=$((failures + 1))
+    WORKER_ERROR_CODE_OVERRIDE=resume_refresh_failed
+  }
+  worker_exec_doh_lifecycle resume || {
+    result=$?
+    log_event warn resume_doh_failed "$result" || true
+    failures=$((failures + 1))
+    WORKER_ERROR_CODE_OVERRIDE=resume_doh_failed
+  }
+  worker_exec_app_policy reconcile || {
+    result=$?
+    log_event warn resume_app_policy_failed "$result" || true
+    failures=$((failures + 1))
+    WORKER_ERROR_CODE_OVERRIDE=resume_app_policy_failed
+  }
+  [ "$failures" -eq 0 ] || { WORKER_RESULT_OVERRIDE=failed; return 76; }
+}
+
 worker_pause_transaction() {
-  local history_result recovery_result recovery_history_result
+  local history_result recovery_result recovery_history_result services_result purge_result
   worker_exec_engine pause || return
   worker_exec_history reconcile
   history_result=$?
-  [ "$history_result" -ne 0 ] || return 0
+  if [ "$history_result" -eq 0 ]; then
+    worker_pause_stop_services
+    services_result=$?
+    if [ "$services_result" -ne 0 ]; then
+      WORKER_TRANSACTION_HANDLED=1
+      return "$services_result"
+    fi
+    worker_exec_engine purge
+    purge_result=$?
+    if [ "$purge_result" -ne 0 ]; then
+      # 该停的都停了，只是磁盘上没清干净：拦截确实停了，不算失败到要回滚。
+      # 记下来，下一次暂停或恢复会把残留收掉。
+      log_event warn pause_purge_failed "$purge_result" || true
+      WORKER_TRANSACTION_HANDLED=1
+      WORKER_RESULT_OVERRIDE=failed
+      WORKER_ERROR_CODE_OVERRIDE=pause_purge_failed
+      return "$purge_result"
+    fi
+    return 0
+  fi
   log_event warn history_reconcile_failed "pause:$history_result" || true
   WORKER_TRANSACTION_HANDLED=1
   worker_exec_engine resume
@@ -88,11 +178,19 @@ worker_pause_transaction() {
 }
 
 worker_resume_transaction() {
-  local history_result recovery_result recovery_history_result
+  local history_result recovery_result recovery_history_result services_result
   worker_exec_engine resume || return
   worker_exec_history reconcile
   history_result=$?
-  [ "$history_result" -ne 0 ] || return 0
+  if [ "$history_result" -eq 0 ]; then
+    worker_resume_start_services
+    services_result=$?
+    if [ "$services_result" -ne 0 ]; then
+      WORKER_TRANSACTION_HANDLED=1
+      return "$services_result"
+    fi
+    return 0
+  fi
   log_event warn history_reconcile_failed "resume:$history_result" || true
   WORKER_TRANSACTION_HANDLED=1
   worker_exec_engine pause
@@ -129,7 +227,6 @@ worker_run_engine() {
     set-overrides) worker_exec_engine set-overrides "$OPERATION_ARG_1" ;;
     reset-rules) worker_exec_engine reset-rules ;;
     set-notice) preferences_set_notice "$OPERATION_ARG_1" ;;
-    set-log-mode) preferences_set_log_mode "$OPERATION_ARG_1" ;;
     set-app-policy) app_policy_apply "$OPERATION_ARG_1" "$OPERATION_ARG_2" "$OPERATION_ARG_3" ;;
     set-lists) worker_exec_engine set-lists "$OPERATION_ARG_1" "$OPERATION_ARG_2" ;;
     set-domain-decision) worker_exec_engine set-domain-decision "$OPERATION_ARG_1" "$OPERATION_ARG_2" ;;

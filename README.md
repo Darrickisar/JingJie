@@ -1,12 +1,12 @@
-# 净界
+# 烛龙
 
-面向 KernelSU、KernelSU Next 与 APatch 的低耗电过滤模块，支持 hosts、可选 DoH、规则管理和回滚。
+面向 KernelSU 及其分支的低耗电过滤模块，支持 hosts、可选 DoH、规则管理和回滚。
 
 ![version](https://img.shields.io/badge/version-V1.0-informational)
 ![versionCode](https://img.shields.io/badge/versionCode-670-lightgrey)
 ![managers](https://img.shields.io/badge/KernelSU%20%C2%B7%20KernelSU%20Next%20%C2%B7%20APatch-supported-brightgreen)
 ![license](https://img.shields.io/badge/license-GPL--3.0--only-blue)
-[![Telegram](https://img.shields.io/badge/Telegram-%40JingJie__Group-26A5E4?logo=telegram&logoColor=white)](https://t.me/JingJie_Group)
+[![Telegram](https://img.shields.io/badge/Telegram-%40ZhuLong__group-26A5E4?logo=telegram&logoColor=white)](https://t.me/ZhuLong_group)
 
 [English](en/README.md)
 
@@ -29,65 +29,77 @@
 ## 🎯 功能一览
 
 ### 规则管理
+
 - **内置来源**: 两个可删除、可恢复的优质来源（秋风规则、10007规则）
 - **自定义来源**: 最多 16 个 HTTPS 来源
 - **智能管理**: 分组折叠、单源刷新、来源健康度监控
 
 ### Hosts 过滤
+
 - **两种模式**: `拦截全部广告` / `保留奖励广告`
 - **灵活控制**: 暂停与恢复保护
 - **可靠性**: 刷新失败时回退到缓存，按版本回滚
 
 ### 加密 DNS (DoH)
+
 - **默认关闭**: 按需启用
 - **灵活配置**: 用户自填 DoH 地址，可选全设备或所选应用
 - **隐私保护**: 不写入 Android Private DNS 设置
 - **可靠性**: 3 层降级策略，关闭成功率 99.9%+
 
 ### 应用策略
+
 - **默认关闭**: 按需启用
 - **双重模式**: 阻止所选应用联网，或仅允许解析出的地址
 - **轻量实现**: 不启动 VPN、代理或常驻网络进程
 
 ### 拦截历史
+
 - **默认关闭**: 按需启用
 - **精确记录**: 仅记录被拒绝的 TCP 连接起始请求
 - **强大筛选**: 按应用 / 域名 / 端口 / 时间筛选
+- **分页浏览**: 每页 50 条，列表规模与记录总数无关
+- **3 小时有效期**: 更早的记录自动删除，不再保留
 
 ### 名单管理
+
 - **手工名单**: 黑白名单（白名单优先级最高）
 - **精确覆写**: 域名级别的精确控制
 - **订阅支持**: 可选的白名单订阅
 
 ### 自动更新
+
 - **默认关闭**: 按需启用
 - **灵活间隔**: 可选 6 / 12 / 24 小时
 
 ### 诊断工具
-- **规则日志**: 手动载入的规则日志
-- **日志级别**: 三档日志级别可选
+
+- **运行日志**: 手动载入，可开关；失败无条件落盘
 - **环境检查**: 一次性环境检查，不做后台轮询
 
 ### 外观定制
+
 - **材质**: 经典 / 液态
 - **主题**: 亮色 / 暗色 / 跟随系统
 - **玻璃效果**: 三档强度可调
 - **自由组合**: 所有选项可自由搭配
 
-完整说明见 **[功能介绍文档](https://github.com/Darrickisar/JingJie/tree/main/features.md)**。
+完整说明见 **[功能介绍文档](https://github.com/Darrickisar/ZhuLong/tree/main/features.md)**。
 
 ---
 
 ## 📥 安装
 
 ### 下载
-从 [Releases](https://github.com/Darrickisar/JingJie/releases) 下载最新版本：
-[`JingJie-V1.0.zip`](https://github.com/Darrickisar/JingJie/releases/download/v1.0/JingJie-V1.0.zip)
+
+从 [Releases](https://github.com/Darrickisar/ZhuLong/releases) 下载最新版本：
+[`ZhuLong-V1.0.zip`](https://github.com/Darrickisar/ZhuLong/releases/download/v1.0/ZhuLong-V1.0.zip)
 
 ### 安装步骤
+
 1. 在 **KernelSU**、**KernelSU Next** 或 **APatch** 管理器中使用 **”从本地安装”** 选择该 ZIP
 2. 按管理器提示重启设备
-3. 从模块卡片的 **”打开”** 进入净界控制台
+3. 从模块卡片的 **”打开”** 进入烛龙控制台
 4. 首次进入会显示使用说明，确认后模块才会自动刷新已启用的来源
 
 > **💡 提示**: 安装过程不联网；第一次联网发生在你确认使用说明之后。
@@ -95,7 +107,8 @@
 > **⚠️ 注意**: 不要在第三方 Recovery 中刷入。本包只按受支持管理器的本地 ZIP 安装入口设计，Recovery 刷机流程未经验证。
 
 ### 模块更新
-模块内更新走 `module.prop` 的 `updateJson`（[`update.json`](https://github.com/Darrickisar/JingJie/blob/main/update.json)），指向本仓库 `main` 分支。
+
+模块内更新走 `module.prop` 的 `updateJson`（[`update.json`](https://github.com/Darrickisar/ZhuLong/blob/main/update.json)），指向本仓库 `main` 分支。
 
 ---
 
@@ -116,32 +129,32 @@ sh tests/shell/run.sh           # BusyBox ash 下的 shell 测试
 打包发布 ZIP（Windows PowerShell）：
 
 ```powershell
-powershell -NoProfile -File ./scripts/build-module.ps1   # 产出 dist/JingJie-V1.0.zip
+powershell -NoProfile -File ./scripts/build-module.ps1   # 产出 dist/ZhuLong-V1.0.zip
 ```
 
 `tests/static/package.test.js` 会把 `dist/` 里的 ZIP 逐字节与源文件比对并检查体积预算，因此改动 `webroot/` 或任何随包脚本后必须重新打包，否则测试会以 “packaged content is stale” 失败。
 
 ### 目录结构
 
-| 路径 | 内容 |
-| --- | --- |
-| `webroot/` | WebUI（原生 JS，无框架）：`index.html`、`app.js`、`api.js`、`bridge.js`、`app.css` |
-| `webui_api.sh` | WebUI 与模块之间的命令边界 |
-| `lib/rules/` | 规则引擎：来源注册、抓取、归一化、生成、挂载、状态、诊断 |
-| `*_manager.sh` | 刷新、DoH、防火墙、历史、进程等子系统 |
-| `cmd/`、`internal/dohproxy/` | Go 实现的 `jingjie-doh-proxy` |
-| `native/`、`tools/` | `history_reader`（C，四种 ABI 预编译）与 `rule_fetcher.dex` |
-| `rules/` | 内置安全基线与恢复用 hosts |
-| `docs/` | 设计文档、发布说明与验证记录 |
-| `tests/` | static / webui / native / shell / device 测试 |
+| 路径                          | 内容                                                                    |
+| --------------------------- | --------------------------------------------------------------------- |
+| `webroot/`                  | WebUI（原生 JS，无框架）：`index.html`、`app.js`、`api.js`、`bridge.js`、`app.css` |
+| `webui_api.sh`              | WebUI 与模块之间的命令边界                                                      |
+| `lib/rules/`                | 规则引擎：来源注册、抓取、归一化、生成、挂载、状态、诊断                                          |
+| `*_manager.sh`              | 刷新、DoH、防火墙、历史、进程等子系统                                                  |
+| `cmd/`、`internal/dohproxy/` | Go 实现的 `zhulong-doh-proxy`                                            |
+| `native/`、`tools/`          | `history_reader`（C，四种 ABI 预编译）与 `rule_fetcher.dex`                    |
+| `rules/`                    | 内置安全基线与恢复用 hosts                                                      |
+| `docs/`                     | 设计文档、发布说明与验证记录                                                        |
+| `tests/`                    | static / webui / native / shell / device 测试                           |
 
 ---
 
 ## 📜 许可与第三方组件
 
-`jingjie-doh-proxy` 静态链接了 AdGuard `dnsproxy`（Apache-2.0）与 `miekg/dns`（BSD-3-Clause）等 Go 模块，版本由 `go.mod` / `go.sum` 固定，清单见 [NOTICES](NOTICES)。
+`zhulong-doh-proxy` 静态链接了 AdGuard `dnsproxy`（Apache-2.0）与 `miekg/dns`（BSD-3-Clause）等 Go 模块，版本由 `go.mod` / `go.sum` 固定，清单见 [NOTICES](NOTICES)。
 
-规则来源的版权归各自项目所有，净界只做下载与格式转换。
+规则来源的版权归各自项目所有，烛龙只做下载与格式转换。
 
 该可执行文件不随模块 ZIP 打包，只在首次启用或检测 DoH 时按设备架构从 v1.0 release 下载，并按 `assets/doh-companions.tsv` 中固定的体积、SHA-256 与 ELF 架构校验。DoH 一直关闭的设备不会下载它。
 
@@ -151,8 +164,9 @@ powershell -NoProfile -File ./scripts/build-module.ps1   # 产出 dist/JingJie-V
 
 ## 💬 联系与反馈
 
-- **Telegram 交流频道**: [@JingJie_Group](https://t.me/JingJie_Group)
-- **问题反馈**: [GitHub Issues](https://github.com/Darrickisar/JingJie/issues)
+- **Telegram 频道**: [@ZhuLong_group](https://t.me/ZhuLong_group)
+- **Telegram 交流群**: [@ZhuLong_Chat](https://t.me/ZhuLong_Chat)
+- **问题反馈**: [GitHub Issues](https://github.com/Darrickisar/ZhuLong/issues)
 
 ---
 
@@ -167,5 +181,5 @@ powershell -NoProfile -File ./scripts/build-module.ps1   # 产出 dist/JingJie-V
 ---
 
 **作者**: 相貌平平韩老魔  
-**仓库**: <https://github.com/Darrickisar/JingJie>  
-**频道**: [@JingJie_Group](https://t.me/JingJie_Group)
+**仓库**: <https://github.com/Darrickisar/ZhuLong>  
+**频道**: [@ZhuLong_group](https://t.me/ZhuLong_group) · **交流群**: [@ZhuLong_Chat](https://t.me/ZhuLong_Chat)

@@ -584,6 +584,13 @@ engine_resume_locked() {
   [ "$ACTIVE_TUPLE_MODE" = paused ] || return 0
   desired=$(mode_desired) || return
   mount_generation_for_mode "$ACTIVE_TUPLE_GENERATION" "$desired" || return
+  # 暂停时把世代清成了只剩 recovery，目标模式的载荷文件已经不在了：
+  # 只能重新构建一版（缓存也删了，所以这一步要联网下载）。
+  # 载荷还在的话（旧版本里暂停过、或清理没走完）走下面便宜的重挂路径。
+  if [ ! -f "$MOUNT_SOURCE" ]; then
+    engine_resume_rebuild_locked "$desired"
+    return
+  fi
   desired_sha=$(sha256_file "$MOUNT_SOURCE") || return
   mount_pid1 "$MOUNT_SOURCE" "$ACTIVE_TUPLE_GENERATION" "$MOUNT_KIND" || {
     result=$?
@@ -661,6 +668,36 @@ engine_refresh_from_candidate() {
   local candidate=$1 mode
   mode=$(active_value active_mode) || return
   engine_refresh_from_candidate_mode "$candidate" "$mode"
+}
+
+# 和 engine_refresh_from_candidate_mode 同一件事，但不写回滚指针。
+# 恢复保护时用：暂停时被清成残桩（只剩 recovery + manifest）的旧世代不能当回滚目标，
+# engine_rollback_locked 会去读它的 all/reward，那两个文件已经不在了。
+engine_refresh_from_candidate_mode_no_alternate() {
+  local candidate=$1 mode=$2 revision config_hash candidate_source candidate_kind candidate_sha result
+  case "$mode" in block_all|preserve_reward|paused) ;; *) return 65 ;; esac
+  active_tuple_load || return
+  revision=$(mount_manifest_value "$RULE_GENERATIONS/$candidate/manifest.prop" sources_revision) || return
+  config_hash=$(mount_manifest_value "$RULE_GENERATIONS/$candidate/manifest.prop" config_snapshot_sha256) || return
+  mount_generation_for_mode "$candidate" "$mode" || return
+  candidate_source=$MOUNT_SOURCE
+  candidate_kind=$MOUNT_KIND
+  mount_pid1 "$candidate_source" "$candidate" "$candidate_kind" || {
+    result=$?
+    active_tuple_mount_loaded || return 76
+    return "$result"
+  }
+  candidate_sha=$(sha256_file "$candidate_source") || {
+    result=$?
+    active_tuple_mount_loaded || return 76
+    return "$result"
+  }
+  active_write_values "$candidate" '' none "$revision" "$config_hash" "$mode" "$candidate_sha"
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    active_tuple_mount_loaded || return 76
+    return "$result"
+  fi
 }
 
 engine_rollback_locked() {

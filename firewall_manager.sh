@@ -13,7 +13,12 @@ firewall_history_manifest() { printf '%s\n' "$RULE_RUNTIME/history-firewall.tsv"
 firewall_history_pending_manifest() { printf '%s\n' "$RULE_RUNTIME/history-firewall.pending.tsv"; }
 firewall_history_probe_manifest() { printf '%s\n' "$RULE_RUNTIME/history-probe.tsv"; }
 
-HISTORY_CHAIN=JINGJIE_HISTORY_GUARD
+HISTORY_CHAIN=${RULE_CHAIN_PREFIX:-ZHULONG}_HISTORY_GUARD
+# hosts 保护自身的三条链。以前这三个名字是散落在比较式和 spec 字符串里的字面量，
+# 改名时极易漏改其中一处而留下半套规则；统一在这里声明。
+HOSTS_FILTER_CHAIN=${RULE_CHAIN_PREFIX:-ZHULONG}_FILTER_OUT
+HOSTS_FORWARD_CHAIN=${RULE_CHAIN_PREFIX:-ZHULONG}_FORWARD
+HOSTS_NAT_CHAIN=${RULE_CHAIN_PREFIX:-ZHULONG}_NAT_OUT
 HISTORY_TRACE_CIDR=127.64.0.0/13
 HISTORY_NFLOG_GROUP=10007
 
@@ -673,7 +678,7 @@ firewall_rules_for() {
      [ "$(cat "$RULE_RUNTIME/firewall-features.prop" 2>/dev/null)" = xiaomi_backup=0 ]; then
     xiaomi_enabled=0
   fi
-  if [ "$table:$chain" = filter:JINGJIE_FILTER_OUT ]; then
+  if [ "$table:$chain" = "filter:$HOSTS_FILTER_CHAIN" ]; then
     while IFS= read -r item || [ -n "$item" ]; do
       case "$item" in ''|'#'*) continue ;; esac
       case "$item:$xiaomi_enabled" in
@@ -689,7 +694,7 @@ firewall_rules_for() {
         firewall_rule_append "$output" "-d $item -j DROP" || return
       done < "$MODDIR/rules/firewall/output-addresses.list"
     fi
-  elif [ "$family:$table:$chain" = ipv4:nat:JINGJIE_NAT_OUT ]; then
+  elif [ "$family:$table:$chain" = "ipv4:nat:$HOSTS_NAT_CHAIN" ]; then
     while IFS= read -r item || [ -n "$item" ]; do
       case "$item" in ''|'#'*) continue ;; esac
       case "$item" in *[!A-Za-z0-9._]*) return 65 ;; esac
@@ -716,7 +721,7 @@ firewall_build_manifest() {
   local manifest=$1 family spec table parent chain rules
   : > "$manifest"
   for family in ipv4 ipv6; do
-    for spec in 'filter OUTPUT JINGJIE_FILTER_OUT' 'filter FORWARD JINGJIE_FORWARD'; do
+    for spec in "filter OUTPUT $HOSTS_FILTER_CHAIN" "filter FORWARD $HOSTS_FORWARD_CHAIN"; do
       set -- $spec; table=$1; parent=$2; chain=$3
       rules="$RULE_TMP/firewall.$family.$chain.$$"
       firewall_rules_for "$family" "$table" "$chain" "$rules" || return
@@ -724,9 +729,9 @@ firewall_build_manifest() {
       rm -f "$rules"
     done
   done
-  rules="$RULE_TMP/firewall.ipv4.JINGJIE_NAT_OUT.$$"
-  firewall_rules_for ipv4 nat JINGJIE_NAT_OUT "$rules" || return
-  firewall_manifest_add "$manifest" ipv4 nat OUTPUT JINGJIE_NAT_OUT "$rules" || return
+  rules="$RULE_TMP/firewall.ipv4.$HOSTS_NAT_CHAIN.$$"
+  firewall_rules_for ipv4 nat "$HOSTS_NAT_CHAIN" "$rules" || return
+  firewall_manifest_add "$manifest" ipv4 nat OUTPUT "$HOSTS_NAT_CHAIN" "$rules" || return
   rm -f "$rules"
 }
 
@@ -737,9 +742,9 @@ $line
 EOF
   [ "$state" = prepared ] || [ "$state" = committed ] || return 65
   [ "$family" = ipv4 ] || [ "$family" = ipv6 ] || return 65
-  [ "$table:$parent:$chain" = filter:OUTPUT:JINGJIE_FILTER_OUT ] || \
-    [ "$table:$parent:$chain" = filter:FORWARD:JINGJIE_FORWARD ] || \
-    [ "$family:$table:$parent:$chain" = ipv4:nat:OUTPUT:JINGJIE_NAT_OUT ] || return 65
+  [ "$table:$parent:$chain" = "filter:OUTPUT:$HOSTS_FILTER_CHAIN" ] || \
+    [ "$table:$parent:$chain" = "filter:FORWARD:$HOSTS_FORWARD_CHAIN" ] || \
+    [ "$family:$table:$parent:$chain" = "ipv4:nat:OUTPUT:$HOSTS_NAT_CHAIN" ] || return 65
   [ "$created" = 1 ] || return 65
   case "$count" in ''|*[!0-9]*) return 65 ;; esac
   firewall_unb64 "$jump" >/dev/null 2>&1 || return 65
@@ -935,8 +940,8 @@ firewall_status() {
   fi
 }
 
-APP_POLICY_CHAIN4=JINGJIE_APP_OUT4
-APP_POLICY_CHAIN6=JINGJIE_APP_OUT6
+APP_POLICY_CHAIN4=${RULE_CHAIN_PREFIX:-ZHULONG}_APP_OUT4
+APP_POLICY_CHAIN6=${RULE_CHAIN_PREFIX:-ZHULONG}_APP_OUT6
 
 firewall_app_policy_manifest() { printf '%s\n' "$RULE_RUNTIME/app-firewall.tsv"; }
 firewall_app_policy_pending_manifest() { printf '%s\n' "$RULE_RUNTIME/app-firewall.pending.tsv"; }
@@ -2140,8 +2145,8 @@ firewall_app_policy_apply() {
   return "$result"
 }
 
-DOH_CHAIN4=JJD4_OUT
-DOH_CHAIN6=JJD6_OUT
+DOH_CHAIN4=${RULE_DOH_CHAIN_PREFIX:-ZLD}4_OUT
+DOH_CHAIN6=${RULE_DOH_CHAIN_PREFIX:-ZLD}6_OUT
 DOH_UID_EXEMPT=65534
 # Opportunistic Private DNS probes DoT on 853; redirecting it into the local
 # proxy makes the probe fail so the resolver falls back to plain 53, which the
@@ -2294,7 +2299,7 @@ firewall_doh_chain_for() {
   local prefix
   firewall_doh_slot_valid "$2" || return
   prefix=$(firewall_doh_family_prefix "$1") || return
-  printf 'JJD%s_%s\n' "$prefix" "$2"
+  printf '%s%s_%s\n' "${RULE_DOH_CHAIN_PREFIX:-ZLD}" "$prefix" "$2"
 }
 
 firewall_doh_output_jump() {
@@ -2723,8 +2728,8 @@ firewall_doh_dispatcher_current_slot() {
   line=$("$BB" awk -v chain="$dispatcher" '$0 != "-N " chain { print; exit }' "$raw") || { rm -f "$raw"; return 70; }
   rm -f "$raw"
   case "$line" in
-    "-A $dispatcher -j JJD4_A"|"-A $dispatcher -j JJD6_A") slot=A ;;
-    "-A $dispatcher -j JJD4_B"|"-A $dispatcher -j JJD6_B") slot=B ;;
+    "-A $dispatcher -j ${RULE_DOH_CHAIN_PREFIX:-ZLD}4_A"|"-A $dispatcher -j ${RULE_DOH_CHAIN_PREFIX:-ZLD}6_A") slot=A ;;
+    "-A $dispatcher -j ${RULE_DOH_CHAIN_PREFIX:-ZLD}4_B"|"-A $dispatcher -j ${RULE_DOH_CHAIN_PREFIX:-ZLD}6_B") slot=B ;;
     *)
       runtime_log_event error firewall dispatcher_unknown_rule \
         "$family：dispatcher $dispatcher 里的规则不是本模块认识的槽位跳转：<$line>" || true
@@ -2985,7 +2990,7 @@ firewall_doh_probe_family_locked() {
 }
 
 firewall_doh_capability_locked() {
-  local chain4="JJ_DOH_CAP4_$$" chain6="JJ_DOH_CAP6_$$" result4 result6 reason table6
+  local chain4="ZL_DOH_CAP4_$$" chain6="ZL_DOH_CAP6_$$" result4 result6 reason table6
   firewall_doh_probe_family_locked ipv4 "$chain4"; result4=$?
   case "$result4" in
     0) ;;
@@ -3731,7 +3736,7 @@ firewall_doh_force_cleanup() {
     fi
 
     # 3. 清空并删除两个槽位链。dispatcher 已先删除，此时槽位链再无引用。
-    #    漏掉这一步会把 JJD4_A/JJD6_A 留在内核里，而下一次启用固定从
+    #    漏掉这一步会把 ZLD4_A/ZLD6_A 留在内核里，而下一次启用固定从
     #    槽位 A 开始，apply_slot_record 遇到已存在的链就返回 76，用户看到的
     #    就是“加密 DNS 运行失败”。
     for slot in A B; do

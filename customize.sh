@@ -29,10 +29,10 @@ if [ -z "$companion_arch" ] && command -v getprop >/dev/null 2>&1; then
   esac
 fi
 if [ -n "$companion_arch" ]; then
-  for archive in "$MODDIR"/companions/jingjie-doh-proxy-*-v1.0.gz; do
+  for archive in "$MODDIR"/companions/zhulong-doh-proxy-*-v1.0.gz; do
     [ -f "$archive" ] && [ ! -L "$archive" ] || continue
     case "$archive" in
-      */"jingjie-doh-proxy-$companion_arch-v1.0.gz") continue ;;
+      */"zhulong-doh-proxy-$companion_arch-v1.0.gz") continue ;;
     esac
     rm -f "$archive" || true
   done
@@ -41,7 +41,7 @@ fi
 /system/bin/sh "$MODDIR/update.sh" || true
 
 if command -v ui_print >/dev/null 2>&1; then
-  ui_print "- 净界 · 引擎"
+  ui_print "- 烛龙 · 引擎"
   ui_print "- 作者：相貌平平韩老魔"
   ui_print "- 请从官方链接下载，以防恶意脚本"
   ui_print "- 为保障网络环境安全，本工具仅支持过滤非法骚扰、恶意代码等违规信息。请正确合理使用工具功能，勿将合法商业广告纳入屏蔽范围。"
@@ -55,4 +55,4 @@ fi
 mkdir -p "$MODDIR/runtime" || abort "initial_refresh_marker_directory_failed"
 : > "$MODDIR/runtime/initial-refresh.pending" || abort "initial_refresh_marker_create_failed"
 
-command -v ui_print >/dev/null 2>&1 && ui_print "- 安全基线已准备；首次进入净界并确认使用说明后将自动刷新规则"
+command -v ui_print >/dev/null 2>&1 && ui_print "- 安全基线已准备；首次进入烛龙并确认使用说明后将自动刷新规则"

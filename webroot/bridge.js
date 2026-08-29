@@ -1,4 +1,4 @@
-const CALLBACK_PREFIX = '__jingjie_cb_';
+const CALLBACK_PREFIX = '__zhulong_cb_';
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 let callbackSequence = 0;
