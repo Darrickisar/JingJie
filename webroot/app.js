@@ -748,7 +748,7 @@ function iconMarkup(name, className = '') {
 
 function setHeaderPresentation(presentation) {
   const nextKey = `${presentation.headerTone}|${presentation.headerIcon}`;
-  elements.headerStatus.className = `header-status status-tone-${presentation.headerTone}`;
+  setClass(elements.headerStatus, `header-status status-tone-${presentation.headerTone}`);
   if (headerPresentationKey !== nextKey) {
     elements.headerStatus.innerHTML = `
       ${iconMarkup(presentation.headerIcon)}
@@ -757,28 +757,47 @@ function setHeaderPresentation(presentation) {
     elements.headerStatusText = elements.headerStatus.querySelector('#header-status-text');
     headerPresentationKey = nextKey;
   }
-  elements.headerStatusText.textContent = presentation.header;
-  elements.statusRail.dataset.tone = presentation.tone;
-  elements.overviewStatus.textContent = presentation.title;
-  elements.overviewDetail.textContent = presentation.detail;
+  setText(elements.headerStatusText, presentation.header);
+  setData(elements.statusRail, 'tone', presentation.tone);
+  setText(elements.overviewStatus, presentation.title);
+  setText(elements.overviewDetail, presentation.detail);
+}
+
+let writesSweepKey = null;
+
+// guardDisabled 是「这个按钮此刻在业务上没意义」，和「全局不可写」是两个独立条件，
+// 真正的 disabled 是两者取或。凡是设了前者的地方都要顺手把结果写回去，不能指望后面
+// 那次兜底扫描替自己收尾——扫描现在只在全局条件变化时才跑。
+function applyGuard(control, guard) {
+  if (!control) return;
+  setData(control, 'guardDisabled', String(guard));
+  setFlag(control, 'disabled',
+    !initialized || !managementUnlocked || Boolean(currentStatus?.busy) || guard);
 }
 
 function setWritesDisabled(disabled) {
   const unavailable = disabled || !managementUnlocked;
-  document.querySelectorAll('.write-action').forEach((control) => {
-    control.disabled = unavailable || control.dataset.guardDisabled === 'true';
-  });
-  elements.modeControl.disabled = unavailable;
-  elements.autoRefreshInterval.disabled = unavailable;
-  if (elements.manualBlocklist) elements.manualBlocklist.disabled = unavailable || listsLoading;
-  if (elements.manualAllowlist) elements.manualAllowlist.disabled = unavailable || listsLoading;
-  if (elements.appPolicyMode) elements.appPolicyMode.disabled = unavailable || appPolicyLoading;
-  if (elements.appPolicyUids) elements.appPolicyUids.disabled = unavailable || appPolicyLoading;
-  if (elements.appPolicyIps) elements.appPolicyIps.disabled = unavailable || appPolicyLoading;
-  if (elements.domainOverrides) elements.domainOverrides.disabled = unavailable || overridesLoading;
-  if (elements.diagnosticsButton) {
-    elements.diagnosticsButton.disabled = !initialized || Boolean(currentStatus?.busy) || diagnosticsLoading;
+  // 这次全文档扫描是兜底：每个产出 .write-action 的地方（sourceCard 的模板、
+  // patchSourceCards、renderDohApps、恢复按钮）都在创建那一刻就按同一个条件设过
+  // disabled，所以只有条件本身变了才需要重扫。操作进行中轮询会按 120/200/320/480ms
+  // 反复调到这里，条件却一直是 true——照旧扫的话，就是每轮把整页近百个按钮连同
+  // 视口外的卡片子树一起标脏，用户此刻正在滑动，那些子树被滑进视口时要重算样式。
+  if (writesSweepKey !== unavailable) {
+    writesSweepKey = unavailable;
+    document.querySelectorAll('.write-action').forEach((control) => {
+      control.disabled = unavailable || control.dataset.guardDisabled === 'true';
+    });
   }
+  setFlag(elements.modeControl, 'disabled', unavailable);
+  setFlag(elements.autoRefreshInterval, 'disabled', unavailable);
+  setFlag(elements.manualBlocklist, 'disabled', unavailable || listsLoading);
+  setFlag(elements.manualAllowlist, 'disabled', unavailable || listsLoading);
+  setFlag(elements.appPolicyMode, 'disabled', unavailable || appPolicyLoading);
+  setFlag(elements.appPolicyUids, 'disabled', unavailable || appPolicyLoading);
+  setFlag(elements.appPolicyIps, 'disabled', unavailable || appPolicyLoading);
+  setFlag(elements.domainOverrides, 'disabled', unavailable || overridesLoading);
+  setFlag(elements.diagnosticsButton, 'disabled',
+    !initialized || Boolean(currentStatus?.busy) || diagnosticsLoading);
   syncDohControls(unavailable);
   syncHistoryControls();
 }
@@ -808,11 +827,30 @@ function sourceStateMarkup(source) {
   `;
 }
 
+let renderedOverviewKey = '';
+
+// 首页健康列表。操作进行中状态会在 fresh/refreshing 之间来回跳，每次轮询都走到这里；
+// 以前每次都 innerHTML 重建全部行，等于在整个加载/保存/刷新期间反复拆建 DOM，
+// 这是首页和规则页掉帧的主要来源。骨架（有哪些来源、什么顺序、叫什么名字）没变时
+// 只改文字和徽标。
 function renderOverviewSources(sources) {
   if (sources.length === 0) {
     elements.overviewSources.innerHTML = '<p class="empty-state">没有可用的规则来源</p>';
+    renderedOverviewKey = '';
     return;
   }
+  const key = sources.map((source) => `${source.id}${displaySourceName(source)}`).join('');
+  const rows = elements.overviewSources.children;
+  if (key === renderedOverviewKey && rows.length === sources.length) {
+    sources.forEach((source, index) => {
+      const row = rows[index];
+      setText(row.querySelector('.health-name span'),
+        source.enabled ? `${formatCount(source.ruleCount)} 条` : '未参与合并');
+      patchStateChip(row.querySelector('.state-chip'), sourceState(source));
+    });
+    return;
+  }
+  renderedOverviewKey = key;
   elements.overviewSources.innerHTML = sources.map((source) => `
     <div class="health-row">
       <div class="health-name">
@@ -822,6 +860,23 @@ function renderOverviewSources(sources) {
       ${sourceStateMarkup(source)}
     </div>
   `).join('');
+}
+
+// 徽标就地更新。图标是 <svg data-lucide><use href="./icons.svg#name">，
+// 类名、文字和 use 的 href 三处都要跟着状态改，否则会出现「文字变了图标没变」。
+// 图标就地换名。data-lucide 和 use 的 href 两处都要改，否则会出现「文字变了图标没变」。
+// 名字没变就一个字都不写——不要换节点：换节点等于拆一次装一次，还要重新解析 use 引用。
+function patchIcon(icon, name) {
+  if (!icon || icon.getAttribute('data-lucide') === name) return;
+  icon.setAttribute('data-lucide', name);
+  icon.querySelector('use')?.setAttribute('href', `./icons.svg#${name}`);
+}
+
+function patchStateChip(chip, state) {
+  if (!chip) return;
+  setClass(chip, `state-chip state-chip-${state.tone}`);
+  setText(chip.querySelector('span'), state.label);
+  patchIcon(chip.querySelector('svg[data-lucide]'), state.icon);
 }
 
 function escapeText(value) {
@@ -917,6 +972,51 @@ function sourceStructureKey(sources) {
   ].join('\u001f')).join('\u001e');
 }
 
+// 下面四个都是「值没变就一个字都不写」。这一层不能省：浏览器在这里不会替我们比对。
+//
+// textContent 赋值是无条件把子节点全换成一个新文本节点，文字一模一样也算一次真实改动。
+// class、data-* 以及 hidden/disabled 这类反射属性同理——写回相同的值照样落一次属性
+// 改动，而属性改动会触发样式失效并沿子树走一遍，比换个文本节点更贵。
+//
+// 为什么值得较真：这些节点所在的容器挂着 content-visibility: auto，改动本身在视口外
+// 很便宜，但它把整棵子树标脏了，等用户滑到那里时，样式和布局就全压在那一帧上。操作
+// 进行中轮询按 120/200/320/480/650ms 一轮轮打过来，每轮脏一遍，于是「操作进行中
+// 滑动界面」必掉帧——这正是用户反馈的现象。
+//
+// checked 不在其中：它是 checkedness，写它不产生属性改动，照常赋值即可。
+function setText(node, value) {
+  if (node && node.textContent !== value) node.textContent = value;
+}
+
+function setClass(node, value) {
+  if (node && node.className !== value) node.className = value;
+}
+
+function setData(node, key, value) {
+  if (node && node.dataset[key] !== value) node.dataset[key] = value;
+}
+
+// hidden / disabled 这类布尔反射属性。读属性很便宜，也不会强制布局。
+function setFlag(node, prop, value) {
+  if (node && node[prop] !== value) node[prop] = value;
+}
+
+// aria-* 之类没有反射属性可读的，比对 getAttribute。setAttribute 写回相同的值同样算
+// 一次属性改动，MutationObserver 照样记一条。
+function setAttr(node, name, value) {
+  if (node && node.getAttribute(name) !== value) node.setAttribute(name, value);
+}
+
+// 名单类 textarea 的 value。这几个框能装到 4,096 行、64KB，写一次就要把整块文本重新排版
+// ——保存名单时这是全页最贵的一次布局。而保存路径上这一步几乎总是在写「一模一样的内容」：
+// 先把规范化后的文本写回框里，紧接着 loadLists 重读，后端返回的又是同一份文本再写一遍。
+// 用户此刻手指还在屏幕上，那次重排就落在滑动的帧上。
+//
+// 顺带还修掉一个手感问题：写 value 会把光标弹到末尾并清掉选区，跳过同值写入就不会动它。
+function setValue(node, value) {
+  if (node && node.value !== value) node.value = value;
+}
+
 // 只把易变字段写回已有卡片。骨架不动，所以不拆 DOM、不重放入场动画，
 // 也不会把用户刚点的那个开关连同焦点一起销毁重建。
 function patchSourceCards(sources) {
@@ -926,29 +1026,13 @@ function patchSourceCards(sources) {
     const card = directory.querySelector(`.source-card[data-source-id="${cssEscapeId(source.id)}"]`);
     if (!card) return;
     const name = displaySourceName(source);
-    card.className = `source-card source-card-${source.kind} source-card-${source.state}`;
+    setClass(card, `source-card source-card-${source.kind} source-card-${source.state}`);
 
-    const chip = card.querySelector('.state-chip');
-    const state = sourceState(source);
-    if (chip) {
-      chip.className = `state-chip state-chip-${state.tone}`;
-      const chipText = chip.querySelector('span');
-      if (chipText) chipText.textContent = state.label;
-      // 图标是 <svg data-lucide><use href="./icons.svg#name">，两处都要改，
-      // 否则状态变了图标还停在上一个。
-      const chipIcon = chip.querySelector('svg[data-lucide]');
-      if (chipIcon && chipIcon.getAttribute('data-lucide') !== state.icon) {
-        chipIcon.setAttribute('data-lucide', state.icon);
-        chipIcon.querySelector('use')?.setAttribute('href', `./icons.svg#${state.icon}`);
-      }
-    }
+    patchStateChip(card.querySelector('.state-chip'), sourceState(source));
 
-    const meta = card.querySelector('.source-meta');
-    if (meta) {
-      meta.textContent = source.enabled
-        ? `${formatCount(source.ruleCount)} 条 · ${formatTime(source.updatedAt)}`
-        : '已停用：规则不参与合并，缓存已清理';
-    }
+    setText(card.querySelector('.source-meta'), source.enabled
+      ? `${formatCount(source.ruleCount)} 条 · ${formatTime(source.updatedAt)}`
+      : '已停用：规则不参与合并，缓存已清理');
 
     // 报错行是「有就显示」，出现和消失都要处理，否则旧错误会一直挂着。
     const errorText = sourceError(source);
@@ -959,7 +1043,7 @@ function patchSourceCards(sources) {
       card.querySelector('.source-main')?.append(errorNode);
     }
     if (errorNode) {
-      if (errorText) errorNode.textContent = errorText;
+      if (errorText) setText(errorNode, errorText);
       else errorNode.remove();
     }
 
@@ -967,30 +1051,31 @@ function patchSourceCards(sources) {
     if (toggle) {
       // 不要覆盖用户刚拨过、正在等后端确认的那一下：只有值真的不同才写。
       if (toggle.checked !== Boolean(source.enabled)) toggle.checked = Boolean(source.enabled);
-      toggle.disabled = disabled;
+      setFlag(toggle, 'disabled', disabled);
+      const action = `${source.enabled ? '停用' : '启用'} ${name}`;
       const label = toggle.closest('.switch-label');
-      if (label) label.title = `${source.enabled ? '停用' : '启用'} ${name}`;
-      const hidden = label?.querySelector('.visually-hidden');
-      if (hidden) hidden.textContent = `${source.enabled ? '停用' : '启用'} ${name}`;
+      if (label && label.title !== action) label.title = action;
+      setText(label?.querySelector('.visually-hidden'), action);
     }
 
     const refresh = card.querySelector('[data-action="refresh"]');
     if (refresh) {
       const blocked = !source.enabled || currentStatus?.activeMode === 'paused';
-      refresh.dataset.guardDisabled = String(blocked);
-      refresh.disabled = disabled || blocked;
-      refresh.title = currentStatus?.activeMode === 'paused'
+      setData(refresh, 'guardDisabled', String(blocked));
+      setFlag(refresh, 'disabled', disabled || blocked);
+      const title = currentStatus?.activeMode === 'paused'
         ? '保护已暂停，恢复后才能刷新'
         : '刷新此来源';
+      if (refresh.title !== title) refresh.title = title;
     }
     card.querySelectorAll('[data-action="move"]').forEach((button) => {
       const first = button.dataset.direction === 'up' && index === 0;
       const last = button.dataset.direction === 'down' && index === sources.length - 1;
-      button.dataset.guardDisabled = String(first || last);
-      button.disabled = disabled || first || last;
+      setData(button, 'guardDisabled', String(first || last));
+      setFlag(button, 'disabled', disabled || first || last);
     });
     card.querySelectorAll('[data-action="edit"],[data-action="delete"]').forEach((button) => {
-      button.disabled = disabled;
+      setFlag(button, 'disabled', disabled);
     });
   });
 }
@@ -1002,6 +1087,43 @@ function cssEscapeId(value) {
 
 let renderedSourceStructureKey = '';
 
+// 纯次序变化的快路径。接手的前提是「这批卡片已经在页面上，只是排错了」，所以要先核对
+// 到能确定重建不会带来任何新内容为止：数量、id 集合，以及卡片上显示的名字和地址。
+// 名字和地址必须比——patchSourceCards 不写 <h4>，改名要是走了这条路，卡片上的名字
+// 就永远停在旧值上。对不上就返回 false，交回给整表重建。
+function reorderSourceCards(builtins, custom) {
+  // 一条来源都没有时下面每一项校验都会「恰好通过」，但那种状态要写的是占位文案，
+  // 不是挪位置，必须交回重建。
+  if (builtins.length === 0 && custom.length === 0) return false;
+  const groups = [[elements.builtinSources, builtins], [elements.customSources, custom]];
+  const plans = [];
+  for (const [container, list] of groups) {
+    // 容器里要么全是卡片，要么只有一个 .empty-state 占位。拿 children 和卡片数一起比，
+    // 就把「有占位符」的情况一并挡在外面，后面的下标才等得上 children 的下标。
+    const cards = [...container.querySelectorAll('.source-card')];
+    if (cards.length !== list.length || container.children.length !== list.length) return false;
+    const byId = new Map(cards.map((card) => [card.dataset.sourceId, card]));
+    for (const source of list) {
+      const card = byId.get(source.id);
+      if (!card) return false;
+      if (card.querySelector('.source-title-line h4')?.textContent !== displaySourceName(source)) return false;
+      if ((card.querySelector('.source-url')?.textContent ?? '') !== (source.url ?? '')) return false;
+    }
+    plans.push([container, list, byId]);
+  }
+  for (const [container, list, byId] of plans) {
+    list.forEach((source, index) => {
+      const card = byId.get(source.id);
+      // 只在位置真的不对时才动这一个节点。上移一次实际只需要挪一个卡片，逐个 append
+      // 会把整列都重新插一遍，白白多出一列样式失效——正在滑动时这点差别是看得见的。
+      if (container.children[index] !== card) {
+        container.insertBefore(card, container.children[index] ?? null);
+      }
+    });
+  }
+  return true;
+}
+
 function renderSourceManagement(sources) {
   const structureKey = sourceStructureKey(sources);
   // 操作进行中会按轮询节奏反复调到这里（来源状态在 fresh/refreshing 之间来回跳）。
@@ -1010,23 +1132,37 @@ function renderSourceManagement(sources) {
   if (structureKey === renderedSourceStructureKey
     && elements.builtinSources.querySelector('.source-card, .empty-state')) {
     patchSourceCards(sources);
-    elements.addSourceButton.disabled = !initialized || !managementUnlocked
-      || Boolean(currentStatus?.busy)
-      || sources.filter((source) => source.kind === 'custom').length >= 16;
+    // 这一条是轮询路径上真正的热点分支，走 applyGuard 顺手把 guardDisabled 一起对齐，
+    // 值没变就一个字都不写。
+    applyGuard(elements.addSourceButton,
+      sources.filter((source) => source.kind === 'custom').length >= 16);
     return;
   }
-  renderedSourceStructureKey = structureKey;
   const builtins = sources.filter((source) => source.kind !== 'custom');
   const custom = sources.filter((source) => source.kind === 'custom');
+
+  // 调整顺序时来源集合没变，只是次序变了。这种情况下把已有卡片挪位置就够了：
+  // append 一个已在文档里的节点是移动而不是新建，所以不拆 DOM、不重建图标、
+  // 不重放入场动画，用户刚点的那个按钮也不会连焦点一起被销毁——这正是
+  // 「调整顺序掉帧」的来源。
+  if (renderedSourceStructureKey && reorderSourceCards(builtins, custom)) {
+    renderedSourceStructureKey = structureKey;
+    patchSourceCards(sources);
+    applyGuard(elements.addSourceButton, custom.length >= 16);
+    return;
+  }
+
+  renderedSourceStructureKey = structureKey;
+  // indexOf 在 map 里是 O(n²)，这里先算一次位置表。
+  const positions = new Map(sources.map((source, index) => [source.id, index]));
   elements.builtinSources.innerHTML = builtins.length
-    ? builtins.map((source) => sourceCard(source, sources.indexOf(source), sources.length)).join('')
+    ? builtins.map((source) => sourceCard(source, positions.get(source.id), sources.length)).join('')
     : '<p class="empty-state">内置来源已删除，可使用下方恢复操作添加</p>';
   elements.customSources.innerHTML = custom.length
-    ? custom.map((source) => sourceCard(source, sources.indexOf(source), sources.length)).join('')
+    ? custom.map((source) => sourceCard(source, positions.get(source.id), sources.length)).join('')
     : '<p class="empty-state">尚未添加自定义规则</p>';
   animateInsertedItems(elements.builtinSources.closest('.source-directory').querySelectorAll('.source-card'));
-  elements.addSourceButton.dataset.guardDisabled = String(custom.length >= 16);
-  elements.addSourceButton.disabled = !initialized || !managementUnlocked || Boolean(currentStatus?.busy) || custom.length >= 16;
+  applyGuard(elements.addSourceButton, custom.length >= 16);
 }
 
 function renderAutoRefresh(value) {
@@ -1035,19 +1171,33 @@ function renderAutoRefresh(value) {
     : 24;
   const enabled = Boolean(value?.enabled);
   elements.autoRefreshEnabled.checked = enabled;
-  elements.autoRefreshEnabled.setAttribute('aria-expanded', String(enabled));
-  elements.autoRefreshInterval.hidden = !enabled;
+  setAttr(elements.autoRefreshEnabled, 'aria-expanded', String(enabled));
+  setFlag(elements.autoRefreshInterval, 'hidden', !enabled);
   document.querySelectorAll('input[name="auto-refresh-interval"]').forEach((input) => {
     input.checked = Number(input.value) === interval;
   });
-  elements.autoRefreshSummary.textContent = enabled
+  setText(elements.autoRefreshSummary, enabled
     ? `每 ${interval} 小时自动更新`
-    : '自动更新已关闭';
+    : '自动更新已关闭');
+}
+
+// 变更检测只看界面真正会显示的字段。以前是 JSON.stringify(sources)，把整份来源
+// （含界面根本不读的字段）序列化一遍，而这是轮询路径——每次操作轮询都要付一次，
+// 而且任何无关字段变动都会触发一次整表重建。
+function sourcesDigest(sources) {
+  let digest = '';
+  for (const source of sources) {
+    digest += `${source.id}${source.kind}${source.url ?? ''}`
+      + `${displaySourceName(source)}${source.enabled ? 1 : 0}${source.state}`
+      + `${source.ruleCount ?? ''}${source.updatedAt ?? ''}`
+      + `${source.error ?? ''}${source.skippedCount ?? 0}`;
+  }
+  return digest;
 }
 
 function renderSources(sources) {
   latestSources = sources;
-  const key = JSON.stringify(sources);
+  const key = sourcesDigest(sources);
   if (key === renderedSourcesKey) return;
   renderedSourcesKey = key;
   renderOverviewSources(sources);
@@ -1061,21 +1211,61 @@ function ensureSourcePanelRendered() {
   refreshIcons(elements.builtinSources.closest('.source-directory'));
 }
 
+// 单个域名的合法性判断。之所以单独拿出来：覆写校验要对每一行都判一次域名，
+// 以前它是整个调 canonicalList，于是每行都白白付一次 Set、sort 和 TextEncoder，
+// 1024 行覆写就是 1024 次——保存时的卡顿主要来自这里。
+function domainIsInvalid(domain) {
+  if (domain.length > 253 || /^[0-9.]+$/.test(domain) || !/^[a-z0-9.-]+$/.test(domain)) return true;
+  if (domain.startsWith('.') || domain.endsWith('.') || domain.includes('..')) return true;
+  return domain.split('.').some((label) => label.length > 63
+    || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label));
+}
+
+// 只数 UTF-8 字节数，不为了取长度而先编码出一整个 Uint8Array。名单上限是 64 KiB，
+// 原来的写法每次保存都要额外分配这么大一块，纯粹是丢给 GC 的垃圾。
+function utf8ByteLength(text) {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length) {
+      const next = text.charCodeAt(index + 1);
+      // 合法代理对算 4 字节并跳过低位；孤立的高位代理按替换字符的 3 字节算。
+      if (next >= 0xdc00 && next <= 0xdfff) { bytes += 4; index += 1; } else bytes += 3;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+// canonicalList / canonicalOverrides 要 split、逐行 trim+转小写、逐行跑一遍格式校验，再去重
+// 排序——名单填到几千行时，这是保存那一帧上最重的一段纯计算。而输入时的防抖校验刚刚已经
+// 拿同样的内容算过一遍了：用户总是停手打字之后才去点保存，两次的输入几乎必然一模一样。
+//
+// 于是按输入框记住「上一次的原文 + 算出来的结果」，原文没变就直接复用，把这一段整个从点击
+// 那一帧上拿掉。每个框只对应一个规范化函数，所以只记原文就够。WeakMap 保证条目数就等于框
+// 的个数，不会随编辑次数增长。
+const canonicalCache = new WeakMap();
+
+function canonicalFor(node, compute) {
+  const raw = node.value;
+  const cached = canonicalCache.get(node);
+  if (cached && cached.raw === raw) return cached.result;
+  const result = compute(raw);
+  canonicalCache.set(node, { raw, result });
+  return result;
+}
+
 function canonicalList(value) {
   const lines = String(value ?? '').split(/\r?\n/)
     .map((line) => line.trim().toLowerCase())
     .filter((line) => line && !line.startsWith('#'));
-  const invalid = lines.find((line) => {
-    if (line.length > 253 || /^[0-9.]+$/.test(line) || !/^[a-z0-9.-]+$/.test(line)) return true;
-    if (line.startsWith('.') || line.endsWith('.') || line.includes('..')) return true;
-    return line.split('.').some((label) => label.length > 63
-      || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label));
-  });
+  const invalid = lines.find(domainIsInvalid);
   if (invalid) return { error: `域名格式无效：${invalid}` };
   const unique = [...new Set(lines)].sort();
   if (unique.length > 4096) return { error: '单个名单最多 4,096 个域名' };
   const text = unique.length ? `${unique.join('\n')}\n` : '';
-  if (new TextEncoder().encode(text).length > 65536) return { error: '单个名单不能超过 65,536 字节' };
+  if (utf8ByteLength(text) > 65536) return { error: '单个名单不能超过 65,536 字节' };
   return { text, count: unique.length };
 }
 
@@ -1108,8 +1298,7 @@ function canonicalOverrides(value) {
     if (fields.length !== 2) return { error: `覆写格式无效：${line}` };
     const domain = fields[0].toLowerCase();
     const address = fields[1].toLowerCase();
-    const domainCheck = canonicalList(domain);
-    if (domainCheck.error || domainCheck.count !== 1 || protectedNames.has(domain) || domain.endsWith('.localhost')) {
+    if (domainIsInvalid(domain) || protectedNames.has(domain) || domain.endsWith('.localhost')) {
       return { error: `覆写域名无效或受保护：${domain}` };
     }
     const family = ipv4Valid(address) ? '4' : ipv6Valid(address) ? '6' : '';
@@ -1122,7 +1311,7 @@ function canonicalOverrides(value) {
   if (rows.length > 1024) return { error: '最多保存 1,024 条覆写' };
   rows.sort((left, right) => left[0].localeCompare(right[0]) || left[1].localeCompare(right[1]));
   const text = rows.length ? `${rows.map((row) => row.join('\t')).join('\n')}\n` : '';
-  if (new TextEncoder().encode(text).length > 65536) return { error: '覆写内容不能超过 65,536 字节' };
+  if (utf8ByteLength(text) > 65536) return { error: '覆写内容不能超过 65,536 字节' };
   return { rows, text, count: rows.length };
 }
 
@@ -1182,11 +1371,13 @@ async function loadOverrides({ force = false, read = null } = {}) {
   try {
     const data = read ? await read() : await execApi('overrides');
     const items = Array.isArray(data?.items) ? data.items : [];
-    elements.domainOverrides.value = items.map((item) => `${item.domain}\t${item.address}`).join('\n');
-    if (items.length) elements.domainOverrides.value += '\n';
-    elements.overrideCount.textContent = `${items.length} 条`;
-    elements.overrideError.textContent = '';
-    elements.overrideSyncNote.textContent = '';
+    // 先把整段文本拼好再写一次。原来是先写一遍、再 `+= '\n'` 补一个换行，那是两次完整的
+    // value 写入——第二次还要先把整块文本读回来——等于把最贵的那次重排做了两遍。
+    const text = items.map((item) => `${item.domain}\t${item.address}`).join('\n');
+    setValue(elements.domainOverrides, items.length ? `${text}\n` : text);
+    setText(elements.overrideCount, `${items.length} 条`);
+    setText(elements.overrideError, '');
+    setText(elements.overrideSyncNote, '');
     overridesLoaded = true;
   } catch (error) {
     elements.overrideSyncNote.textContent = '读取失败';
@@ -1198,26 +1389,32 @@ async function loadOverrides({ force = false, read = null } = {}) {
 }
 
 async function saveOverrides() {
-  const result = canonicalOverrides(elements.domainOverrides.value);
-  elements.overrideError.textContent = result.error || '';
+  const result = canonicalFor(elements.domainOverrides, canonicalOverrides);
+  setText(elements.overrideError, result.error || '');
   if (result.error) return;
-  elements.domainOverrides.value = result.text;
-  elements.overrideCount.textContent = `${result.count} 条`;
+  setValue(elements.domainOverrides, result.text);
+  setText(elements.overrideCount, `${result.count} 条`);
   await runMutation('set-overrides', [encodeBase64Utf8(result.text)]);
   overridesLoaded = false;
   await loadOverrides({ force: true });
 }
 
 function renderListCounts(blockCount, allowCount) {
-  if (elements.blockListCount) elements.blockListCount.textContent = `${formatCount(blockCount)} 条`;
-  if (elements.allowListCount) elements.allowListCount.textContent = `${formatCount(allowCount)} 条`;
+  setText(elements.blockListCount, `${formatCount(blockCount)} 条`);
+  setText(elements.allowListCount, `${formatCount(allowCount)} 条`);
 }
 
 function renderListErrors(blockError = '', allowError = '') {
-  elements.blockListError.textContent = blockError;
-  elements.allowListError.textContent = allowError;
+  setText(elements.blockListError, blockError);
+  setText(elements.allowListError, allowError);
   elements.manualBlocklist.toggleAttribute('aria-invalid', Boolean(blockError));
   elements.manualAllowlist.toggleAttribute('aria-invalid', Boolean(allowError));
+}
+
+// 后端返回的名单数组按 canonicalList 的形状拼成文本：非空时带结尾换行，空名单就是空串。
+function listText(items) {
+  if (!Array.isArray(items) || items.length === 0) return '';
+  return `${items.join('\n')}\n`;
 }
 
 function loadLists({ force = false, read = null } = {}) {
@@ -1244,8 +1441,13 @@ function loadLists({ force = false, read = null } = {}) {
           elements.listSyncNote.textContent = '配置已更新，正在重读';
           continue;
         }
-        elements.manualBlocklist.value = Array.isArray(data?.block) ? data.block.join('\n') : '';
-        elements.manualAllowlist.value = Array.isArray(data?.allow) ? data.allow.join('\n') : '';
+        // 保存后紧接着就会重读一次，返回的和框里现有的内容一字不差，跳过这次重排。
+        // 结尾那个换行必须跟 canonicalList 保持一致：保存时写进框里的文本是带换行的，
+        // 这里要是按 join('\n') 拼成不带的，两份就差一个字符，跳过判定永远不成立，
+        // 两个框每次保存都要把整块文本重排两遍。canonicalList 会滤掉空行，末尾这个
+        // 换行对所有读取方都是透明的，loadOverrides 一直也是这么写的。
+        setValue(elements.manualBlocklist, listText(data?.block));
+        setValue(elements.manualAllowlist, listText(data?.allow));
         listsRevision = data.revision;
         listsLoaded = true;
         renderListCounts(data?.blockCount ?? 0, data?.allowCount ?? 0);
@@ -1270,12 +1472,14 @@ function loadLists({ force = false, read = null } = {}) {
 
 async function saveLists() {
   if (!initialized || !managementUnlocked || currentStatus?.busy) return;
-  const block = canonicalList(elements.manualBlocklist.value);
-  const allow = canonicalList(elements.manualAllowlist.value);
+  const block = canonicalFor(elements.manualBlocklist, canonicalList);
+  const allow = canonicalFor(elements.manualAllowlist, canonicalList);
   renderListErrors(block.error || '', allow.error || '');
   if (block.error || allow.error) return;
-  elements.manualBlocklist.value = block.text;
-  elements.manualAllowlist.value = allow.text;
+  // 用户填的内容本来就规范时（粘贴一份已经排好的名单、或者只是又点了一次保存），
+  // 规范化的结果和框里的一字不差，这次重排整块文本的开销就可以整个省掉。
+  setValue(elements.manualBlocklist, block.text);
+  setValue(elements.manualAllowlist, allow.text);
   renderListCounts(block.count, allow.count);
   await runMutation('set-lists', [encodeBase64Utf8(block.text), encodeBase64Utf8(allow.text)]);
 }
@@ -1284,9 +1488,9 @@ function renderStatus(status) {
   if (!status || typeof status !== 'object') return;
   currentStatus = status;
   initialized = true;
-  elements.app.setAttribute('aria-busy', String(Boolean(status.busy)));
-  setHeaderPresentation(statusPresentation(status));
-  elements.ruleCount.textContent = formatCount(status.ruleCount);
+  setAttr(elements.app, 'aria-busy', String(Boolean(status.busy)));
+  setHeaderPresentation(dohHeaderPresentation(statusPresentation(status)));
+  setText(elements.ruleCount, formatCount(status.ruleCount));
   renderListCounts(status.manualBlockCount ?? 0, status.manualAllowCount ?? 0);
   renderAutoRefresh(status.autoRefresh);
   if (listsLoaded && listsRevision !== status.desiredSourcesRevision && !status.busy) {
@@ -1306,89 +1510,91 @@ function renderStatus(status) {
   const impactCopy = elements.ruleCount.closest('#rule-impact-copy');
   const paused = status.activeMode === 'paused';
   // 第一行永远是「规则总数」，本地规则等细节放在第二行小字里。
-  if (impactCopy) {
+  // 这句话由「前缀 + 活的 ruleCount 节点 + 后缀」三段拼成，措辞只有三种。原来每轮都
+  // 先清空再 append 一遍：清空会把 ruleCount 从文档里摘下来，append 又插回去，等于
+  // 每轮拆装一次首页最显眼的那行字，一定要重排。措辞没变时一个字都不用动。
+  const impactPrefix = paused ? '已暂停，当前挂载 '
+    : retainedPreviousGeneration ? '当前保留上一版 '
+    : '当前已经累积 ';
+  if (impactCopy && impactCopy.firstChild?.nodeValue !== impactPrefix) {
     impactCopy.textContent = '';
-    if (paused) impactCopy.append('已暂停，当前挂载 ', elements.ruleCount, ' 条 hosts 规则');
-    else if (retainedPreviousGeneration) impactCopy.append('当前保留上一版 ', elements.ruleCount, ' 条 hosts 规则');
-    else impactCopy.append('当前已经累积 ', elements.ruleCount, ' 条 hosts 规则');
+    impactCopy.append(impactPrefix, elements.ruleCount, ' 条 hosts 规则');
   }
   if (elements.ruleImpactHint) {
     const localCopy = `本地规则 ${formatCount(status.ruleCount)} 条`;
-    if (paused) {
-      elements.ruleImpactHint.textContent = '缓存与历史版本已清空，恢复保护时重新下载规则';
-    } else if (allSourcesDisabled) {
-      elements.ruleImpactHint.textContent = `${localCopy} · 已停用全部来源：来源规则不生效，手工黑名单仍然拦截`;
-    } else if (noOnlineRules) {
-      elements.ruleImpactHint.textContent = `${localCopy} · 在线来源未加载，只剩内置名单与手工规则生效`;
-    } else if (onlineRuleTotal > 0) {
-      elements.ruleImpactHint.textContent = `在线来源合计 ${formatCount(onlineRuleTotal)} 条 · 超过 50,000 条会轻微影响网络`;
-    } else {
-      elements.ruleImpactHint.textContent = '超过 50,000 条会轻微影响网络';
-    }
+    setText(elements.ruleImpactHint, paused
+      ? '缓存与历史版本已清空，恢复保护时重新下载规则'
+      : allSourcesDisabled
+      ? `${localCopy} · 已停用全部来源：来源规则不生效，手工黑名单仍然拦截`
+      : noOnlineRules
+      ? `${localCopy} · 在线来源未加载，只剩内置名单与手工规则生效`
+      : onlineRuleTotal > 0
+      ? `在线来源合计 ${formatCount(onlineRuleTotal)} 条 · 超过 50,000 条会轻微影响网络`
+      : '超过 50,000 条会轻微影响网络');
   }
   const hasRuleCount = Number.isFinite(status.ruleCount);
   const hasLightImpact = hasRuleCount && status.ruleCount <= 50_000;
   if (paused) {
-    elements.networkImpact.textContent = '保护已暂停';
-    elements.ruleImpact.dataset.tone = 'notice';
+    setText(elements.networkImpact, '保护已暂停');
+    setData(elements.ruleImpact, 'tone', 'notice');
   } else if (!hasRuleCount) {
-    elements.networkImpact.textContent = '等待读取';
-    elements.ruleImpact.dataset.tone = 'neutral';
+    setText(elements.networkImpact, '等待读取');
+    setData(elements.ruleImpact, 'tone', 'neutral');
   } else if (noOnlineRules) {
-    elements.networkImpact.textContent = '仅本地保护';
-    elements.ruleImpact.dataset.tone = 'notice';
+    setText(elements.networkImpact, '仅本地保护');
+    setData(elements.ruleImpact, 'tone', 'notice');
   } else {
-    elements.networkImpact.textContent = hasLightImpact ? '网络基本无影响' : '可能轻微影响网络';
-    elements.ruleImpact.dataset.tone = hasLightImpact ? 'calm' : 'notice';
+    setText(elements.networkImpact, hasLightImpact ? '网络基本无影响' : '可能轻微影响网络');
+    setData(elements.ruleImpact, 'tone', hasLightImpact ? 'calm' : 'notice');
   }
-  elements.lastSuccess.textContent = formatTime(status.lastSuccessAt);
+  setText(elements.lastSuccess, formatTime(status.lastSuccessAt));
 
   const mode = status.desiredMode || status.activeMode;
   document.querySelectorAll('input[name="mode"]').forEach((input) => {
     input.checked = input.value === mode;
   });
-  elements.modeSyncNote.textContent = paused
+  setText(elements.modeSyncNote, paused
     ? '恢复后继续使用当前模式'
     // 模式偏好确实保留，这句不用改；规则内容会重新下载，那句在上面的规则总数提示里。
-    : status.desiredMode !== status.activeMode ? '模式等待应用' : '';
+    : status.desiredMode !== status.activeMode ? '模式等待应用' : '');
 
-  elements.pauseProtectionButton.hidden = paused || !status.activeGeneration;
-  elements.resumeProtectionButton.hidden = !paused;
-  elements.pauseProtectionButton.dataset.guardDisabled = String(!status.activeGeneration);
+  setFlag(elements.pauseProtectionButton, 'hidden', paused || !status.activeGeneration);
+  setFlag(elements.resumeProtectionButton, 'hidden', !paused);
+  applyGuard(elements.pauseProtectionButton, !status.activeGeneration);
 
   // 暂停期间「立即刷新」会被后端拒掉：它要下载全部来源再重建世代，正是暂停停掉的事。
-  elements.refreshButton.dataset.guardDisabled = String(paused);
-  elements.refreshButton.title = paused ? '保护已暂停，恢复后才能刷新' : '';
+  applyGuard(elements.refreshButton, paused);
+  const refreshTitle = paused ? '保护已暂停，恢复后才能刷新' : '';
+  if (elements.refreshButton.title !== refreshTitle) elements.refreshButton.title = refreshTitle;
 
   // 缓存只有在来源被停用之后才会变成没人用的死文件：启用中的来源要留着缓存断网兜底，
   // 删除来源时缓存已经顺手清掉了。所以没有停用来源就没有可清的东西，直接锁住按钮。
   const disabledSourceCount = sources.length - enabledSources.length;
-  elements.clearCacheButton.dataset.guardDisabled = String(disabledSourceCount === 0);
-  elements.clearCacheButton.title = disabledSourceCount > 0
+  applyGuard(elements.clearCacheButton, disabledSourceCount === 0);
+  const clearCacheTitle = disabledSourceCount > 0
     ? `清理 ${formatCount(disabledSourceCount)} 个已停用来源留下的缓存文件`
     : '没有已停用的来源，暂时没有可清理的缓存';
+  if (elements.clearCacheButton.title !== clearCacheTitle) {
+    elements.clearCacheButton.title = clearCacheTitle;
+  }
 
   const rollbackVisible = status.alternateAction === 'rollback' || status.alternateAction === 'redo';
-  elements.rollbackButton.hidden = !rollbackVisible;
-  const rollbackSpan = elements.rollbackButton.querySelector('span');
-  const rollbackIcon = elements.rollbackButton.querySelector('.rollback-icon');
+  setFlag(elements.rollbackButton, 'hidden', !rollbackVisible);
   if (rollbackVisible) {
     const iconName = status.alternateAction === 'redo' ? 'rotate-cw' : 'rotate-ccw';
-    rollbackSpan.textContent = status.alternateAction === 'redo' ? '恢复新版' : '回滚上一版';
-    if (rollbackIcon && rollbackIcon.dataset.iconName !== iconName) {
-      const placeholder = document.createElement('i');
-      placeholder.className = 'rollback-icon';
-      placeholder.dataset.lucide = iconName;
-      placeholder.dataset.iconName = iconName;
-      placeholder.setAttribute('aria-hidden', 'true');
-      rollbackIcon.replaceWith(placeholder);
-    }
+    setText(elements.rollbackButton.querySelector('span'),
+      status.alternateAction === 'redo' ? '恢复新版' : '回滚上一版');
+    // 图标就地改 data-lucide 和 use 的 href，和 patchStateChip 同一个路子。
+    //
+    // 原来是换成一个占位 <i data-lucide data-icon-name>，等下面 refreshIcons 再变回 svg。
+    // 但 refreshIcons 只搬 data-lucide，不带 data-icon-name，于是变回来的 svg 上永远读不到
+    // 这个值，判断就永远成立——回滚按钮显示期间，每一轮轮询都要拆一次、装一次。
+    patchIcon(elements.rollbackButton.querySelector('.rollback-icon'), iconName);
   }
 
   renderSources(sources);
   setWritesDisabled(Boolean(status.busy));
   if (historyStatus) renderHistoryStatus(historyStatus);
-  if (dohStatus) applyDohHeaderPresentation();
   refreshIcons(elements.headerStatus);
   refreshIcons(elements.overviewSources);
   refreshIcons(elements.rollbackButton);
@@ -1650,14 +1856,26 @@ function selectedDohMode() {
   return document.querySelector('input[name="doh-mode"]:checked')?.value || 'off';
 }
 
+// 加密 DNS 生效时在头部和首页详情后面各加一段后缀。
+//
+// 这里改成「先把后缀拼进 presentation，再整句写一次」，而不是原来的「先写主句，再回头读
+// 出来接一段」。原来那种写法每轮轮询都必然改两次 DOM：renderStatus 先把不带后缀的主句
+// 写回去，紧接着这里读到没有后缀又追加一次。两次的值都和上一次不同，setText 的比对根本
+// 挡不住。现在最终值一轮和一轮一样，就一个字都不用写。
+function dohHeaderPresentation(presentation) {
+  if (!dohVerifiedActive()) return presentation;
+  return {
+    ...presentation,
+    header: `${presentation.header} · DoH`,
+    detail: presentation.detail ? `${presentation.detail}；加密 DNS 已启用` : '加密 DNS 已启用',
+  };
+}
+
+// 加密 DNS 状态单独刷新时（它有自己 5 秒一次的轮询）也要把头部重算一遍，否则刚启用完
+// 头部要等到下一次状态轮询才带上后缀。
 function applyDohHeaderPresentation() {
-  if (!dohVerifiedActive()) return;
-  if (!elements.headerStatusText.textContent.includes('DoH')) {
-    elements.headerStatusText.textContent = `${elements.headerStatusText.textContent} · DoH`;
-  }
-  if (!elements.overviewDetail.textContent.includes('加密 DNS 已启用')) {
-    elements.overviewDetail.textContent = `${elements.overviewDetail.textContent}；加密 DNS 已启用`;
-  }
+  if (!currentStatus) return;
+  setHeaderPresentation(dohHeaderPresentation(statusPresentation(currentStatus)));
 }
 
 function stopDohRefresh() {
@@ -1685,10 +1903,10 @@ function renderDohStatus(status = {}) {
   const renderMode = active ? status.effectiveMode : 'off';
   document.querySelectorAll('input[name="doh-mode"]').forEach((input) => {
     input.checked = input.value === renderMode;
-    input.dataset.guardDisabled = String(input.value === 'selected' && !selectedSupported);
+    setData(input, 'guardDisabled', String(input.value === 'selected' && !selectedSupported));
   });
-  elements.dohSelectedRegion.hidden = renderMode !== 'selected';
-  elements.dohAppList.hidden = renderMode !== 'selected';
+  setFlag(elements.dohSelectedRegion, 'hidden', renderMode !== 'selected');
+  setFlag(elements.dohAppList, 'hidden', renderMode !== 'selected');
 
   // 后端会回传已提交的地址，用它回填输入框，避免每次重新启用都要重输。
   if (typeof status.endpoint === 'string' && status.endpoint
@@ -1699,19 +1917,20 @@ function renderDohStatus(status = {}) {
 
   const selectedUnsupported = supported && !selectedSupported;
   const selectedUnsupportedCopy = selectedUnsupported ? ' · 当前设备不支持所选应用模式' : '';
+  // 加密 DNS 生效时这一段自己也有 5 秒一次的轮询，措辞一直不变，同样一个字都不该写。
   if (!supported) {
-    elements.dohStatus.textContent = '当前设备不支持加密 DNS';
+    setText(elements.dohStatus, '当前设备不支持加密 DNS');
   } else if (active) {
     const modeCopy = status.effectiveMode === 'selected' ? '所选应用' : '全设备';
-    elements.dohStatus.textContent = `加密 DNS 已启用 · ${modeCopy}${selectedUnsupportedCopy}`;
+    setText(elements.dohStatus, `加密 DNS 已启用 · ${modeCopy}${selectedUnsupportedCopy}`);
   } else if (status.desiredMode && status.desiredMode !== 'off' && status.lastError) {
-    elements.dohStatus.textContent = `已回退到关闭 · ${dohErrorMessage(status.lastError)}${selectedUnsupportedCopy}`;
+    setText(elements.dohStatus, `已回退到关闭 · ${dohErrorMessage(status.lastError)}${selectedUnsupportedCopy}`);
   } else {
-    elements.dohStatus.textContent = `加密 DNS 关闭${selectedUnsupportedCopy}`;
+    setText(elements.dohStatus, `加密 DNS 关闭${selectedUnsupportedCopy}`);
   }
-  elements.dohStatus.className = active
+  setClass(elements.dohStatus, active
     ? 'state-chip state-chip-success'
-    : status.lastError ? 'state-chip state-chip-warning' : 'state-chip';
+    : status.lastError ? 'state-chip state-chip-warning' : 'state-chip');
   syncDohControls();
   applyDohHeaderPresentation();
   if (renderMode === 'selected' && !dohAppsLoaded && !dohAppsLoading) {
@@ -1734,19 +1953,22 @@ function syncDohControls(disabled = !initialized || !managementUnlocked || Boole
   const unavailable = disabled || dohLoading;
   const selected = selectedDohMode() === 'selected';
   const selectedSupported = selectedDohSupported();
-  elements.dohMode.disabled = unavailable;
+  // 这里十几个开关全走 setFlag：setWritesDisabled 每轮轮询都会调到这个函数，而操作
+  // 进行中这些值一轮都不会变。hidden 尤其要紧，它落在 .doh-section 这种挂了
+  // content-visibility 的容器里，写一次就把整棵子树标脏。
+  setFlag(elements.dohMode, 'disabled', unavailable);
   document.querySelectorAll('input[name="doh-mode"]').forEach((input) => {
-    input.disabled = unavailable || (input.value === 'selected' && !selectedSupported);
+    setFlag(input, 'disabled', unavailable || (input.value === 'selected' && !selectedSupported));
   });
-  elements.dohSelectedRegion.hidden = !selected;
-  elements.dohAppList.hidden = !selected;
-  elements.dohEndpoint.disabled = unavailable;
-  elements.dohTest.disabled = unavailable;
-  elements.dohApply.disabled = unavailable;
-  elements.dohDisable.disabled = unavailable || !dohVerifiedActive();
-  elements.dohAppSearch.disabled = unavailable || !selected || dohAppsLoading;
-  elements.dohUids.disabled = unavailable || !selected;
-  elements.dohLoadMoreApps.disabled = unavailable || dohAppsLoading;
+  setFlag(elements.dohSelectedRegion, 'hidden', !selected);
+  setFlag(elements.dohAppList, 'hidden', !selected);
+  setFlag(elements.dohEndpoint, 'disabled', unavailable);
+  setFlag(elements.dohTest, 'disabled', unavailable);
+  setFlag(elements.dohApply, 'disabled', unavailable);
+  setFlag(elements.dohDisable, 'disabled', unavailable || !dohVerifiedActive());
+  setFlag(elements.dohAppSearch, 'disabled', unavailable || !selected || dohAppsLoading);
+  setFlag(elements.dohUids, 'disabled', unavailable || !selected);
+  setFlag(elements.dohLoadMoreApps, 'disabled', unavailable || dohAppsLoading);
 }
 
 async function loadDohStatus({ force = false, refresh = false } = {}) {
@@ -2058,12 +2280,13 @@ async function loadAppPolicy({ force = false } = {}) {
       return;
     }
     const families = Array.isArray(capability?.families) ? capability.families.join(' / ') : 'IPv4';
-    elements.appPolicyStatus.textContent = policy?.enabled ? '应用联网策略已启用' : '应用联网策略';
-    elements.appPolicyDetail.textContent = `支持 ${families}；共享 UID、VPN/TUN、应用自带 DoH 可能影响策略效果。`;
-    elements.appPolicyMode.value = policy?.enabled ? (policy?.mode || 'block_selected') : 'off';
-    elements.appPolicyUids.value = Array.isArray(policy?.uids) ? policy.uids.join('\n') : '';
-    elements.appPolicyIps.value = Array.isArray(policy?.allowIps) ? policy.allowIps.join('\n') : '';
-    elements.appPolicyControls.hidden = false;
+    setText(elements.appPolicyStatus, policy?.enabled ? '应用联网策略已启用' : '应用联网策略');
+    setText(elements.appPolicyDetail, `支持 ${families}；共享 UID、VPN/TUN、应用自带 DoH 可能影响策略效果。`);
+    setValue(elements.appPolicyMode, policy?.enabled ? (policy?.mode || 'block_selected') : 'off');
+    // 保存后会重读一次，返回的和框里现有的通常一字不差；这两个框同样能装很多行。
+    setValue(elements.appPolicyUids, Array.isArray(policy?.uids) ? policy.uids.join('\n') : '');
+    setValue(elements.appPolicyIps, Array.isArray(policy?.allowIps) ? policy.allowIps.join('\n') : '');
+    setFlag(elements.appPolicyControls, 'hidden', false);
     appPolicyLoaded = true;
   } catch (error) {
     elements.appPolicyStatus.textContent = '应用策略状态不可用';
@@ -3062,8 +3285,9 @@ function syncHistoryControls() {
     || currentStatus?.activeMode === 'paused' || historyStatus?.availability === 'unsupported';
   const enabled = Boolean(historyStatus?.enabled);
   if (elements.historyEnabled) {
+    // checked 是 checkedness，不是反射属性，写回同样的值不产生改动，照常赋值。
     elements.historyEnabled.checked = enabled;
-    elements.historyEnabled.disabled = unavailable;
+    setFlag(elements.historyEnabled, 'disabled', unavailable);
   }
   [
     elements.historyAppFilter,
@@ -3072,7 +3296,7 @@ function syncHistoryControls() {
     elements.historyTimeFilter,
     elements.clearHistoryButton,
   ].forEach((control) => {
-    if (control) control.disabled = unavailable || !enabled;
+    setFlag(control, 'disabled', unavailable || !enabled);
   });
   elements.historyList?.toggleAttribute('inert', historyLoading);
   if (historyActionsDisabled !== actionsDisabled) {
@@ -3087,29 +3311,31 @@ function syncHistoryControls() {
 function renderHistoryStatus(status = {}) {
   historyStatus = status;
   const presentation = historyStatusLabel(status);
-  elements.historyStatusTitle.textContent = presentation.title;
-  elements.historyStateChip.textContent = presentation.chip;
-  elements.historyStatusRail.dataset.tone = presentation.tone;
+  setText(elements.historyStatusTitle, presentation.title);
+  setText(elements.historyStateChip, presentation.chip);
+  setData(elements.historyStatusRail, 'tone', presentation.tone);
   const enabled = Boolean(status.enabled);
-  elements.historyEnabled.setAttribute('aria-expanded', String(enabled));
-  elements.historyDetails.hidden = !enabled;
-  elements.historyStatusDetail.textContent = currentStatus?.activeMode === 'paused'
+  setAttr(elements.historyEnabled, 'aria-expanded', String(enabled));
+  setFlag(elements.historyDetails, 'hidden', !enabled);
+  setText(elements.historyStatusDetail, currentStatus?.activeMode === 'paused'
     ? '暂停期间不会写入或修改拦截日志；恢复保护后继续使用原有偏好。'
     : status.availability === 'unsupported'
     ? '当前设备未提供 NFLOG 能力，普通 hosts 规则仍然正常工作。'
     : status.logging
       ? '仅记录被拒绝的 TCP 连接起始请求；放行的连接抓不到。记录只保留最近 3 小时，更早的会自动删除。关闭后不再产生新的历史。'
-      : '开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电；放行的连接抓不到。记录只保留最近 3 小时，更早的会自动删除。';
-  elements.historyCapability.textContent = status.availability === 'unsupported'
+      : '开启后仅记录被拒绝的 TCP 连接起始请求，会增加少量耗电；放行的连接抓不到。记录只保留最近 3 小时，更早的会自动删除。');
+  // 能力状态和报错先在字符串里拼完再写一次。原来是先写主体、再用 += 追加，那是两次
+  // DOM 改动，中间还夹一次 textContent 读取。
+  let capability = status.availability === 'unsupported'
     ? '能力状态：不可用'
     : status.availability === 'available' ? '能力状态：可用' : '能力状态：待检测';
-  elements.historyCountSummary.textContent = `${formatCount(status.interceptionCount ?? 0)} 次连接 · ${formatCount(status.eventRowCount ?? 0)} 条事件`;
   if (status.lastError) {
     const errorDetail = historyErrorMessage(status.lastError);
-    if (errorDetail !== presentation.title) {
-      elements.historyCapability.textContent += ` · ${errorDetail}`;
-    }
+    if (errorDetail !== presentation.title) capability += ` · ${errorDetail}`;
   }
+  setText(elements.historyCapability, capability);
+  setText(elements.historyCountSummary,
+    `${formatCount(status.interceptionCount ?? 0)} 次连接 · ${formatCount(status.eventRowCount ?? 0)} 条事件`);
   syncHistoryControls();
   refreshIcons(elements.historyStatusRail);
   // 开启即实时：只看 enabled。以前这里要求 logging 也为真才挂探针，把
@@ -3180,7 +3406,8 @@ function historyAllowSet() {
   const value = elements.manualAllowlist.value;
   if (value === historyAllowCacheText) return historyAllowCacheSet;
   historyAllowCacheText = value;
-  const allow = canonicalList(value);
+  // 走同一份按框缓存的结果：拦截日志渲染时白名单往往刚刚被校验过，不必再算一遍。
+  const allow = canonicalFor(elements.manualAllowlist, canonicalList);
   historyAllowCacheSet = allow.error || !allow.text
     ? new Set()
     : new Set(allow.text.trimEnd().split('\n'));
@@ -3300,12 +3527,11 @@ function renderHistoryPager() {
   if (!elements.historyPager) return;
   const pages = historyPageCount();
   const multi = historyTotal > HISTORY_PAGE_SIZE;
-  elements.historyPager.hidden = !multi || !historyStatus?.enabled;
-  if (elements.historyPageStatus) {
-    elements.historyPageStatus.textContent = `第 ${historyPage + 1} / ${pages} 页 · 共 ${formatCount(historyTotal)} 条`;
-  }
-  if (elements.historyPrevPage) elements.historyPrevPage.disabled = historyLoading || historyPage <= 0;
-  if (elements.historyNextPage) elements.historyNextPage.disabled = historyLoading || historyPage + 1 >= pages;
+  setFlag(elements.historyPager, 'hidden', !multi || !historyStatus?.enabled);
+  setText(elements.historyPageStatus,
+    `第 ${historyPage + 1} / ${pages} 页 · 共 ${formatCount(historyTotal)} 条`);
+  setFlag(elements.historyPrevPage, 'disabled', historyLoading || historyPage <= 0);
+  setFlag(elements.historyNextPage, 'disabled', historyLoading || historyPage + 1 >= pages);
 }
 
 // 翻到某一页。页码越界（比如过期删除后总数变少）就夹回有效范围。
@@ -3674,9 +3900,9 @@ function setupInteractions() {
   elements.saveOverridesButton.addEventListener('click', saveOverrides);
   elements.domainOverrides.addEventListener('input', () => {
     debounce('overrides-validate', () => {
-      const result = canonicalOverrides(elements.domainOverrides.value);
-      elements.overrideError.textContent = result.error || '';
-      elements.overrideCount.textContent = `${result.count ?? 0} 条`;
+      const result = canonicalFor(elements.domainOverrides, canonicalOverrides);
+      setText(elements.overrideError, result.error || '');
+      setText(elements.overrideCount, `${result.count ?? 0} 条`);
     }, LIST_VALIDATE_DEBOUNCE_MS);
   });
   elements.builtinRecovery.addEventListener('click', async (event) => {
@@ -3744,8 +3970,9 @@ function setupInteractions() {
   for (const input of [elements.manualBlocklist, elements.manualAllowlist]) {
     input.addEventListener('input', () => {
       debounce('manual-lists-validate', () => {
-        const block = canonicalList(elements.manualBlocklist.value);
-        const allow = canonicalList(elements.manualAllowlist.value);
+        // 结果连同原文一起记下来，点保存时不用再算一遍。
+        const block = canonicalFor(elements.manualBlocklist, canonicalList);
+        const allow = canonicalFor(elements.manualAllowlist, canonicalList);
         renderListCounts(block.count ?? 0, allow.count ?? 0);
         renderListErrors(block.error || '', allow.error || '');
       }, LIST_VALIDATE_DEBOUNCE_MS);

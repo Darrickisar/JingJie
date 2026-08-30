@@ -3692,6 +3692,12 @@ dialog form {
   gap: 8px;
   align-items: center;
   padding: 9px 12px;
+  /* 「加载更多」是累加的：点几次就有几百行留在文档里，而这一列没有虚拟化。
+     跳过视口外的行，滑动时的样式和布局只落在看得见的那十几行上。
+     和 .history-row 一样用 auto：共享 UID 的行多一段说明会换行，真实高度不止 56px，
+     写死数值会让滚动高度短掉一截；后面的 64px 只是从没渲染过时的兜底估计。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;
 }
 
 .doh-app-row + .doh-app-row {
@@ -4038,6 +4044,8 @@ dialog form {
 
   .doh-app-row {
     grid-template-columns: 44px minmax(0, 1fr);
+    /* 窄屏下说明文字换到第二行，兜底估计跟着抬高。 */
+    contain-intrinsic-size: auto 88px;
   }
 
   .doh-app-row em {
